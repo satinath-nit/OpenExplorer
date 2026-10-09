@@ -115,9 +115,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             FileHandle.standardError.write(Data("FAIL: OpenExplorer launched without a visible key window\n".utf8))
             exit(1)
         }
-        let shortcuts: [(String, String)] = [("New Tab", "n"), ("Copy", "c"), ("Paste", "v")]
+        let shortcuts: [(String, String)] = [("New Tab", "n"), ("Copy", "c"), ("Paste", "v"), ("Close Window", "x")]
         guard shortcuts.allSatisfy({ menuItem(titled: $0.0)?.keyEquivalent == $0.1 && menuItem(titled: $0.0)?.target === browserWindow }) else {
             FileHandle.standardError.write(Data("FAIL: OpenExplorer keyboard shortcuts are not routed to the browser window\n".utf8))
+            exit(1)
+        }
+        guard let cutItem = menuItem(titled: "Cut"),
+              cutItem.keyEquivalent == "x",
+              cutItem.keyEquivalentModifierMask == [.command, .shift],
+              cutItem.target === browserWindow else {
+            FileHandle.standardError.write(Data("FAIL: Cut is not routed to Shift-Command-X\n".utf8))
             exit(1)
         }
         let appearanceFailures = browserWindow?.appearanceSmokeTestFailures() ?? ["browser window is unavailable"]
@@ -144,7 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             exit(1)
         }
 
-        window.performClose(nil)
+        browserWindow?.closeWindow(nil)
         DispatchQueue.main.async { [weak self, weak window] in
             guard let self, let window, !window.isVisible else {
                 FileHandle.standardError.write(Data("FAIL: OpenExplorer window did not close cleanly\n".utf8))
@@ -161,6 +168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func finishSuccessfulSmokeTest() {
         print("PASS: OpenExplorer launched with a visible key window")
+        print("PASS: Command-X closes the window and Shift-Command-X cuts selections")
         print("PASS: Command-N, Command-C, and Command-V are routed to the browser window")
         print("PASS: OpenExplorer surfaces adapt to light and dark appearance")
         print("PASS: Address editing and folder location actions are available")
@@ -211,6 +219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let editItem = NSMenuItem()
         let editMenu = NSMenu(title: "Edit")
         let cut = editMenu.addItem(withTitle: "Cut", action: #selector(BrowserWindowController.cutSelection(_:)), keyEquivalent: "x")
+        cut.keyEquivalentModifierMask = [.command, .shift]
         cut.target = browserWindow
         let copy = editMenu.addItem(withTitle: "Copy", action: #selector(BrowserWindowController.copySelection(_:)), keyEquivalent: "c")
         copy.target = browserWindow
@@ -240,6 +249,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let windowItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
+        let closeWindow = windowMenu.addItem(withTitle: "Close Window", action: #selector(BrowserWindowController.closeWindow(_:)), keyEquivalent: "x")
+        closeWindow.target = browserWindow
+        windowMenu.addItem(.separator())
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
         windowItem.submenu = windowMenu

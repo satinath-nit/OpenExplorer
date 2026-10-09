@@ -20,7 +20,7 @@ Designed and developed by Satinath Mondal.
 - Folder context actions to copy a home-relative path or open the location in Terminal
 - Persistent last folder, favorites, pane choices, and view mode
 - Finder-style app lifecycle: closing the last window keeps OpenExplorer in the Dock, ready to reopen
-- Native shortcuts including `⌘N` New Tab, `⌘C` Copy, `⌘V` Paste, `⇧⌘N` New Folder, and `⌘L` Location
+- Native shortcuts including `⌘N` New Tab, `⌘X` Close Window, `⌘C` Copy, `⌘V` Paste, `⇧⌘X` Cut, `⇧⌘N` New Folder, and `⌘L` Location
 - System-wide `⌘E` shortcut to bring OpenExplorer forward or restore its closed window while it is running in the Dock
 
 ## System requirements
@@ -105,10 +105,10 @@ release/OpenExplorer.app
 release/OpenExplorer-<version>-<architecture>.dmg
 ```
 
-For example, an Apple-silicon build of version 1.4.0 produces:
+For example, an Apple-silicon build of version 1.4.1 produces:
 
 ```text
-release/OpenExplorer-1.4.0-arm64.dmg
+release/OpenExplorer-1.4.1-arm64.dmg
 ```
 
 To request a specific architecture supported by the installed toolchain:

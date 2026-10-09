@@ -1258,6 +1258,10 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         renderActiveTab()
     }
 
+    @objc func closeWindow(_ sender: Any?) {
+        window?.performClose(sender)
+    }
+
     @objc private func selectTab(_ sender: NSButton) {
         guard let index = tabIndexes[ObjectIdentifier(sender)], tabs.indices.contains(index) else { return }
         activeTabIndex = index
