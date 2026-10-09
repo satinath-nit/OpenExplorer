@@ -16,7 +16,7 @@ OpenExplorer is a native, open-source macOS file manager for people who prefer t
 - Sortable Name, Date Modified, Date Created, Type, and Size columns; Date Modified defaults to newest-first for every folder
 - Favorites, Quick Access, cloud-storage locations, and local devices
 - Back and forward history for each tab
-- Create, open, rename, copy, cut, paste, and move items to the macOS Trash
+- Create folders and blank files of any type, then open, rename, copy, cut, paste, or move items to the macOS Trash
 - Quick Look integration and optional hidden-file display
 - Folder context actions to copy a home-relative path or open the location in Terminal
 - Persistent last folder, favorites, pane choices, and view mode
@@ -106,10 +106,10 @@ release/OpenExplorer.app
 release/OpenExplorer-<version>-<architecture>.dmg
 ```
 
-For example, an Apple-silicon build of version 1.4.3 produces:
+For example, an Apple-silicon build of version 1.5.0 produces:
 
 ```text
-release/OpenExplorer-1.4.3-arm64.dmg
+release/OpenExplorer-1.5.0-arm64.dmg
 ```
 
 To request a specific architecture supported by the installed toolchain:

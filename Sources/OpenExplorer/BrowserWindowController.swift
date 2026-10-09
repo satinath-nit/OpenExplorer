@@ -185,6 +185,13 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
                 failures.append("icon context menu is missing \(title)")
             }
         }
+        for menu in [tableView.menu, collectionView.menu] {
+            let newMenu = menu?.item(withTitle: "New")?.submenu
+            if newMenu?.item(withTitle: "New Folder")?.target !== self
+                || newMenu?.item(withTitle: "New Blank File…")?.target !== self {
+                failures.append("context menu is missing New Folder or New Blank File")
+            }
+        }
         if breadcrumbContainer.menu?.item(withTitle: "Copy Address")?.target !== self
             || breadcrumbContainer.menu?.item(withTitle: "Edit Address")?.target !== self {
             failures.append("address bar actions are incomplete")
@@ -470,7 +477,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         stack.edgeInsets = NSEdgeInsets(top: 7, left: 12, bottom: 7, right: 12)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let newButton = commandButton("New", symbol: "folder.badge.plus", help: "New folder", action: #selector(createFolder(_:)), labeled: true)
+        let newButton = commandButton("New", symbol: "folder.badge.plus", help: "Create a folder or blank file", action: #selector(showNewMenu(_:)), labeled: true)
         let cut = commandButton("", symbol: "scissors", help: "Cut", action: #selector(cutSelection(_:)))
         let copy = commandButton("", symbol: "doc.on.doc", help: "Copy", action: #selector(copySelection(_:)))
         let paste = commandButton("", symbol: "clipboard", help: "Paste", action: #selector(paste(_:)))
@@ -791,6 +798,8 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
             )
         ]
         let menu = NSMenu()
+        addNewSubmenu(to: menu)
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Open", action: #selector(openSelection(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Quick Look", action: #selector(quickLook(_:)), keyEquivalent: "")
         menu.addItem(.separator())
@@ -820,6 +829,8 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         collectionView.addGestureRecognizer(doubleClick)
 
         let menu = NSMenu()
+        addNewSubmenu(to: menu)
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Open", action: #selector(openSelection(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Quick Look", action: #selector(quickLook(_:)), keyEquivalent: "")
         menu.addItem(.separator())
@@ -1436,6 +1447,26 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         } catch { showError("Could not create folder", detail: error.localizedDescription) }
     }
 
+    @objc func createBlankFile(_ sender: Any?) {
+        guard let name = prompt(
+            title: "New Blank File",
+            message: "Enter a name with any extension, such as notes.txt, page.html, or data.json.",
+            defaultValue: "New File.txt",
+            confirm: "Create"
+        ) else { return }
+        do {
+            _ = try BlankFileCreator.create(named: name, in: currentURL)
+            reloadContents()
+        } catch {
+            showError("Could not create file", detail: error.localizedDescription)
+        }
+    }
+
+    @objc private func showNewMenu(_ sender: NSButton) {
+        let menu = makeNewMenu()
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY + 4), in: sender)
+    }
+
     @objc func renameSelection(_ sender: Any?) {
         guard selectedItems.count == 1, let item = selectedItems.first else { return }
         guard let name = prompt(title: "Rename", message: item.name, defaultValue: item.name, confirm: "Rename"), !name.isEmpty, name != item.name else { return }
@@ -1582,6 +1613,23 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         button.bezelStyle = .texturedRounded
         button.toolTip = help
         return button
+    }
+
+    private func makeNewMenu() -> NSMenu {
+        let menu = NSMenu(title: "New")
+        let folder = menu.addItem(withTitle: "New Folder", action: #selector(createFolder(_:)), keyEquivalent: "")
+        folder.image = NSImage(systemSymbolName: "folder.badge.plus", accessibilityDescription: "New Folder")
+        folder.target = self
+        let file = menu.addItem(withTitle: "New Blank File…", action: #selector(createBlankFile(_:)), keyEquivalent: "")
+        file.image = NSImage(systemSymbolName: "doc.badge.plus", accessibilityDescription: "New Blank File")
+        file.target = self
+        return menu
+    }
+
+    private func addNewSubmenu(to menu: NSMenu) {
+        let newItem = menu.addItem(withTitle: "New", action: nil, keyEquivalent: "")
+        newItem.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New")
+        newItem.submenu = makeNewMenu()
     }
 
     private func commandSeparator() -> NSBox {

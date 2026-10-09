@@ -66,4 +66,25 @@ require(
     "Name sorting should continue to group folders first"
 )
 
+let creationTestDirectory = FileManager.default.temporaryDirectory
+    .appendingPathComponent("OpenExplorerCoreChecks-\(UUID().uuidString)", isDirectory: true)
+try FileManager.default.createDirectory(at: creationTestDirectory, withIntermediateDirectories: false)
+defer { try? FileManager.default.removeItem(at: creationTestDirectory) }
+let blankFile = try BlankFileCreator.create(named: "example.json", in: creationTestDirectory)
+require(FileManager.default.fileExists(atPath: blankFile.path), "Blank file creation should create the requested file type")
+let blankFileContents = try Data(contentsOf: blankFile)
+require(blankFileContents.isEmpty, "A new blank file should contain no data")
+do {
+    _ = try BlankFileCreator.create(named: "example.json", in: creationTestDirectory)
+    require(false, "Blank file creation should not overwrite an existing item")
+} catch BlankFileCreator.CreationError.itemAlreadyExists {
+    // Expected.
+}
+do {
+    _ = try BlankFileCreator.create(named: "../outside.txt", in: creationTestDirectory)
+    require(false, "Blank file creation should reject paths outside the current folder")
+} catch BlankFileCreator.CreationError.invalidName {
+    // Expected.
+}
+
 print("OpenExplorerCore checks passed")

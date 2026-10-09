@@ -204,6 +204,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let newFolder = fileMenu.addItem(withTitle: "New Folder", action: #selector(BrowserWindowController.createFolder(_:)), keyEquivalent: "n")
         newFolder.keyEquivalentModifierMask = [.command, .shift]
         newFolder.target = browserWindow
+        let newBlankFile = fileMenu.addItem(withTitle: "New Blank File…", action: #selector(BrowserWindowController.createBlankFile(_:)), keyEquivalent: "")
+        newBlankFile.target = browserWindow
         let open = fileMenu.addItem(withTitle: "Open", action: #selector(BrowserWindowController.openSelection(_:)), keyEquivalent: "o")
         open.target = browserWindow
         let quickLook = fileMenu.addItem(withTitle: "Quick Look", action: #selector(BrowserWindowController.quickLook(_:)), keyEquivalent: "y")
