@@ -81,6 +81,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
     private let forwardButton = NSButton()
     private let upButton = NSButton()
     private let previewToggle = NSButton()
+    private let sortPopup = NSPopUpButton()
     private let viewPopup = NSPopUpButton()
     private let contentSplit = NSSplitView()
     private let previewPanel = NSVisualEffectView()
@@ -167,6 +168,11 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
 
     func interactionSmokeTestFailures() -> [String] {
         var failures: [String] = []
+        if tableView.sortDescriptors.first?.key != FileSortKey.modified.rawValue
+            || tableView.sortDescriptors.first?.ascending != false
+            || sortPopup.indexOfSelectedItem != 2 {
+            failures.append("Date Modified is not the newest-first default sort")
+        }
         if !addressField.isEditable || !addressField.isSelectable {
             failures.append("address field is not editable and selectable")
         }
@@ -471,11 +477,10 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         let rename = commandButton("", symbol: "pencil", help: "Rename", action: #selector(renameSelection(_:)))
         let trash = commandButton("", symbol: "trash", help: "Move to Trash", action: #selector(trashSelection(_:)))
 
-        let sort = NSPopUpButton()
-        sort.addItems(withTitles: ["Sort: Name", "Name: Z–A", "Date Modified", "Date Created", "Size"])
-        sort.bezelStyle = .texturedRounded
-        sort.target = self
-        sort.action = #selector(sortChanged(_:))
+        sortPopup.addItems(withTitles: ["Sort: Name", "Name: Z–A", "Date Modified", "Date Created", "Size"])
+        sortPopup.bezelStyle = .texturedRounded
+        sortPopup.target = self
+        sortPopup.action = #selector(sortChanged(_:))
 
         viewPopup.addItems(withTitles: BrowserViewMode.allCases.map { "View: \($0.title)" })
         let viewSymbols = [
@@ -512,7 +517,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        [newButton, commandSeparator(), cut, copy, paste, rename, trash, commandSeparator(), sort, viewPopup, hidden, reload, spacer, quickLook, previewToggle]
+        [newButton, commandSeparator(), cut, copy, paste, rename, trash, commandSeparator(), sortPopup, viewPopup, hidden, reload, spacer, quickLook, previewToggle]
             .forEach(stack.addArrangedSubview)
 
         bar.addSubview(stack)
@@ -779,6 +784,12 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         let size = tableColumn("size", title: "Size", width: 100, min: 75)
         size.sortDescriptorPrototype = NSSortDescriptor(key: "size", ascending: true)
         tableView.addTableColumn(size)
+        tableView.sortDescriptors = [
+            NSSortDescriptor(
+                key: FileItemSorter.defaultKey.rawValue,
+                ascending: FileItemSorter.defaultAscending
+            )
+        ]
         let menu = NSMenu()
         menu.addItem(withTitle: "Open", action: #selector(openSelection(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Quick Look", action: #selector(quickLook(_:)), keyEquivalent: "")
@@ -972,19 +983,22 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         visibleItems = query.isEmpty ? items : items.filter { $0.name.localizedCaseInsensitiveContains(query) }
         let descriptor = tableView.sortDescriptors.first
-        let key = descriptor?.key ?? "name"
+        let key = FileSortKey(rawValue: descriptor?.key ?? "name") ?? .name
         let ascending = descriptor?.ascending ?? true
-        visibleItems.sort { left, right in
-            if left.isDirectory != right.isDirectory { return left.isDirectory }
-            let order: ComparisonResult
-            switch key {
-            case "modified": order = (left.modified ?? .distantPast).compare(right.modified ?? .distantPast)
-            case "created": order = (left.created ?? .distantPast).compare(right.created ?? .distantPast)
-            case "kind": order = left.kind.localizedStandardCompare(right.kind)
-            case "size": order = left.size == right.size ? .orderedSame : (left.size < right.size ? .orderedAscending : .orderedDescending)
-            default: order = left.name.localizedStandardCompare(right.name)
-            }
-            return ascending ? order == .orderedAscending : order == .orderedDescending
+        let itemsByIdentifier = Dictionary(uniqueKeysWithValues: visibleItems.map { ($0.url.path, $0) })
+        let sortableItems = visibleItems.map {
+            FileSortEntry(
+                identifier: $0.url.path,
+                name: $0.name,
+                isDirectory: $0.isDirectory,
+                modified: $0.modified,
+                created: $0.created,
+                kind: $0.kind,
+                size: $0.size
+            )
+        }
+        visibleItems = FileItemSorter.sorted(sortableItems, by: key, ascending: ascending).compactMap {
+            itemsByIdentifier[$0.identifier]
         }
         tableView.reloadData()
         tableView.deselectAll(nil)
@@ -1190,7 +1204,10 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         updateStatus()
         updatePreview()
     }
-    func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) { applyFilterAndSort() }
+    func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+        syncSortPopup()
+        applyFilterAndSort()
+    }
     func controlTextDidChange(_ obj: Notification) { if obj.object as? NSSearchField === searchField { applyFilterAndSort() } }
     func controlTextDidEndEditing(_ obj: Notification) {
         if obj.object as? NSTextField === addressField {
@@ -1283,6 +1300,20 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         case 3: tableView.sortDescriptors = [NSSortDescriptor(key: "created", ascending: false)]
         case 4: tableView.sortDescriptors = [NSSortDescriptor(key: "size", ascending: false)]
         default: tableView.sortDescriptors = [NSSortDescriptor(key: "name", ascending: true)]
+        }
+    }
+
+    private func syncSortPopup() {
+        guard let descriptor = tableView.sortDescriptors.first else {
+            sortPopup.selectItem(at: 0)
+            return
+        }
+        switch descriptor.key {
+        case "name": sortPopup.selectItem(at: descriptor.ascending ? 0 : 1)
+        case "modified": sortPopup.selectItem(at: 2)
+        case "created": sortPopup.selectItem(at: 3)
+        case "size": sortPopup.selectItem(at: 4)
+        default: break
         }
     }
 
