@@ -5,8 +5,7 @@ Package.resolved
 
 # Packaged applications and installers
 release/
-*.app
-*.dmg
+
 *.pkg
 *.zip
 
