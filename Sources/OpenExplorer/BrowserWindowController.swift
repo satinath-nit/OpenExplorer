@@ -72,9 +72,9 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
     private let breadcrumbContainer = BreadcrumbView()
     private let addressField = NSTextField()
     private let searchField = NSSearchField()
-    private let tableView = NSTableView()
+    private let tableView = ExplorerTableView()
     private let tableScroll = NSScrollView()
-    private let collectionView = NSCollectionView()
+    private let collectionView = ExplorerCollectionView()
     private let collectionScroll = NSScrollView()
     private let statusLabel = NSTextField(labelWithString: "")
     private let backButton = NSButton()
@@ -130,6 +130,108 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func appearanceSmokeTestFailures() -> [String] {
+        guard let window else { return ["window is unavailable"] }
+        let originalAppearance = window.appearance
+        defer { window.appearance = originalAppearance }
+
+        var failures: [String] = []
+        for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+            guard let appearance = NSAppearance(named: appearanceName) else { continue }
+            window.appearance = appearance
+            window.contentView?.layoutSubtreeIfNeeded()
+            window.contentView?.displayIfNeeded()
+
+            let expected = NSColor.controlBackgroundColor.resolvedColor(with: appearance)
+            guard let background = breadcrumbContainer.layer?.backgroundColor else {
+                failures.append("breadcrumb has no background in \(appearanceName.rawValue)")
+                continue
+            }
+            let actual = NSColor(cgColor: background) ?? .clear
+            if !actual.isVisuallyEqual(to: expected) {
+                failures.append("breadcrumb background is fixed in \(appearanceName.rawValue)")
+            }
+
+            if let activeTab = tabStack.arrangedSubviews[safe: activeTabIndex] as? AppearanceSurfaceView,
+               let tabBackground = activeTab.layer?.backgroundColor {
+                let actualTab = NSColor(cgColor: tabBackground) ?? .clear
+                if !actualTab.isVisuallyEqual(to: expected) {
+                    failures.append("active tab background is fixed in \(appearanceName.rawValue)")
+                }
+            }
+        }
+        return failures
+    }
+
+    func interactionSmokeTestFailures() -> [String] {
+        var failures: [String] = []
+        if !addressField.isEditable || !addressField.isSelectable {
+            failures.append("address field is not editable and selectable")
+        }
+        let expectedContextActions = ["Copy Path Relative to Home", "Open in Terminal"]
+        for title in expectedContextActions {
+            if tableView.menu?.item(withTitle: title)?.target !== self {
+                failures.append("list context menu is missing \(title)")
+            }
+            if collectionView.menu?.item(withTitle: title)?.target !== self {
+                failures.append("icon context menu is missing \(title)")
+            }
+        }
+        if breadcrumbContainer.menu?.item(withTitle: "Copy Address")?.target !== self
+            || breadcrumbContainer.menu?.item(withTitle: "Edit Address")?.target !== self {
+            failures.append("address bar actions are incomplete")
+        }
+        let sample = fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Documents/Example", isDirectory: true)
+        if pathRelativeToHome(sample) != "Documents/Example" {
+            failures.append("home-relative path formatting is incorrect")
+        }
+        focusAddress(nil)
+        if addressField.isHidden || !breadcrumbStack.isHidden || addressField.stringValue != currentURL.path {
+            failures.append("address editing mode does not open")
+        }
+        rebuildBreadcrumbs()
+        return failures
+    }
+
+    func listColumnTransitionSmokeTestFailures() -> [String] {
+        guard let window else { return ["window is unavailable"] }
+        let originalMode = viewMode
+        let originalSize = window.contentView?.bounds.size ?? .zero
+        defer {
+            viewMode = originalMode
+            window.setContentSize(originalSize)
+            applyViewMode()
+        }
+
+        window.setContentSize(NSSize(width: 1800, height: 820))
+        window.contentView?.layoutSubtreeIfNeeded()
+        viewMode = .list
+        applyViewMode()
+        window.contentView?.layoutSubtreeIfNeeded()
+        let before = visibleListColumnWidths()
+
+        viewMode = .largeIcons
+        applyViewMode()
+        window.contentView?.layoutSubtreeIfNeeded()
+        viewMode = .list
+        applyViewMode()
+        window.contentView?.layoutSubtreeIfNeeded()
+        let after = visibleListColumnWidths()
+
+        let changed = zip(before, after).contains { abs($0 - $1) > 2 }
+        let excessiveNameWidth = after.first.map { $0 > 600 } ?? true
+        guard !changed, !excessiveNameWidth else {
+            return ["List widths changed from \(before.map(Int.init)) to \(after.map(Int.init))"]
+        }
+        return []
+    }
+
+    private func visibleListColumnWidths() -> [CGFloat] {
+        ["name", "modified", "created"].compactMap { identifier in
+            tableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(identifier))?.width
+        }
+    }
 
     private func buildInterface() {
         guard let content = window?.contentView else { return }
@@ -213,17 +315,14 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         tabIndexes.removeAll()
 
         for (index, tab) in tabs.enumerated() {
-            let container = NSView()
-            container.wantsLayer = true
+            let container = AppearanceSurfaceView()
             container.layer?.cornerRadius = 8
             container.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
-            container.layer?.backgroundColor = index == activeTabIndex
-                ? NSColor.controlBackgroundColor.cgColor
-                : NSColor.clear.cgColor
+            container.fillColor = index == activeTabIndex ? .controlBackgroundColor : .clear
 
             let button = NSButton(title: tab.title, target: self, action: #selector(selectTab(_:)))
             button.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Folder tab")
-            button.contentTintColor = .systemYellow
+            button.contentTintColor = .explorerFolderTint
             button.imagePosition = .imageLeading
             button.isBordered = false
             button.alignment = .left
@@ -271,11 +370,10 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         configureNavButton(forwardButton, symbol: "chevron.right", help: "Forward", action: #selector(goForward(_:)))
         configureNavButton(upButton, symbol: "arrow.up", help: "Up", action: #selector(goUp(_:)))
 
-        breadcrumbContainer.wantsLayer = true
         breadcrumbContainer.layer?.cornerRadius = 8
         breadcrumbContainer.layer?.borderWidth = 1
-        breadcrumbContainer.layer?.borderColor = NSColor.separatorColor.cgColor
-        breadcrumbContainer.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        breadcrumbContainer.fillColor = .controlBackgroundColor
+        breadcrumbContainer.strokeColor = .separatorColor
         breadcrumbContainer.translatesAutoresizingMaskIntoConstraints = false
 
         breadcrumbStack.orientation = .horizontal
@@ -287,6 +385,8 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         addressField.isHidden = true
         addressField.isBordered = false
         addressField.drawsBackground = false
+        addressField.isEditable = true
+        addressField.isSelectable = true
         addressField.font = .systemFont(ofSize: 13)
         addressField.placeholderString = "/path/to/folder"
         addressField.delegate = self
@@ -295,13 +395,38 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         addressField.translatesAutoresizingMaskIntoConstraints = false
         breadcrumbContainer.addSubview(addressField)
 
+        let editAddress = NSButton()
+        editAddress.image = NSImage(systemSymbolName: "pencil", accessibilityDescription: "Edit address")
+        editAddress.title = ""
+        editAddress.isBordered = false
+        editAddress.refusesFirstResponder = true
+        editAddress.toolTip = "Edit or copy address (Command-L)"
+        editAddress.target = self
+        editAddress.action = #selector(focusAddress(_:))
+        editAddress.translatesAutoresizingMaskIntoConstraints = false
+        breadcrumbContainer.addSubview(editAddress)
+
+        let addressMenu = NSMenu()
+        let copyAddress = addressMenu.addItem(withTitle: "Copy Address", action: #selector(copyCurrentAddress(_:)), keyEquivalent: "")
+        copyAddress.target = self
+        let copyRelativeAddress = addressMenu.addItem(withTitle: "Copy Address Relative to Home", action: #selector(copyCurrentAddressRelativeToHome(_:)), keyEquivalent: "")
+        copyRelativeAddress.target = self
+        addressMenu.addItem(.separator())
+        let editAddressItem = addressMenu.addItem(withTitle: "Edit Address", action: #selector(focusAddress(_:)), keyEquivalent: "")
+        editAddressItem.target = self
+        breadcrumbContainer.menu = addressMenu
+
         NSLayoutConstraint.activate([
             breadcrumbStack.leadingAnchor.constraint(equalTo: breadcrumbContainer.leadingAnchor, constant: 10),
-            breadcrumbStack.trailingAnchor.constraint(lessThanOrEqualTo: breadcrumbContainer.trailingAnchor, constant: -10),
+            breadcrumbStack.trailingAnchor.constraint(lessThanOrEqualTo: editAddress.leadingAnchor, constant: -6),
             breadcrumbStack.centerYAnchor.constraint(equalTo: breadcrumbContainer.centerYAnchor),
             addressField.leadingAnchor.constraint(equalTo: breadcrumbContainer.leadingAnchor, constant: 10),
-            addressField.trailingAnchor.constraint(equalTo: breadcrumbContainer.trailingAnchor, constant: -10),
-            addressField.centerYAnchor.constraint(equalTo: breadcrumbContainer.centerYAnchor)
+            addressField.trailingAnchor.constraint(equalTo: editAddress.leadingAnchor, constant: -6),
+            addressField.centerYAnchor.constraint(equalTo: breadcrumbContainer.centerYAnchor),
+            editAddress.trailingAnchor.constraint(equalTo: breadcrumbContainer.trailingAnchor, constant: -8),
+            editAddress.centerYAnchor.constraint(equalTo: breadcrumbContainer.centerYAnchor),
+            editAddress.widthAnchor.constraint(equalToConstant: 22),
+            editAddress.heightAnchor.constraint(equalToConstant: 22)
         ])
 
         breadcrumbContainer.onBackgroundClick = { [weak self] in
@@ -540,7 +665,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
             hint.widthAnchor.constraint(equalTo: favoritesStack.widthAnchor).isActive = true
         } else {
             favoriteURLs.forEach {
-                addSidebarLocation($0.lastPathComponent, symbol: "folder.fill", color: .systemYellow, url: $0, to: favoritesStack)
+                addSidebarLocation($0.lastPathComponent, symbol: "folder.fill", color: .explorerFolderTint, url: $0, to: favoritesStack)
             }
         }
     }
@@ -574,9 +699,8 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
     }
 
     private func buildFileArea() -> NSView {
-        let area = NSView()
-        area.wantsLayer = true
-        area.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        let area = AppearanceSurfaceView()
+        area.fillColor = .controlBackgroundColor
         configureTable()
         configureCollectionView()
 
@@ -630,7 +754,10 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         tableView.intercellSpacing = NSSize(width: 0, height: 1)
         tableView.allowsMultipleSelection = true
         tableView.allowsEmptySelection = true
-        tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        // Hidden columns participate unpredictably in AppKit's automatic width
+        // redistribution. Keep user-visible widths stable across view-mode changes;
+        // the scroll view already provides horizontal scrolling when needed.
+        tableView.columnAutoresizingStyle = .noColumnAutoresizing
         tableView.dataSource = self
         tableView.delegate = self
         tableView.target = self
@@ -659,6 +786,10 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         menu.addItem(withTitle: "Cut", action: #selector(cutSelection(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Copy", action: #selector(copySelection(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Paste Here", action: #selector(paste(_:)), keyEquivalent: "")
+        let copyRelativePath = menu.addItem(withTitle: "Copy Path Relative to Home", action: #selector(copyPathRelativeToHome(_:)), keyEquivalent: "")
+        copyRelativePath.target = self
+        let openTerminal = menu.addItem(withTitle: "Open in Terminal", action: #selector(openInTerminal(_:)), keyEquivalent: "")
+        openTerminal.target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Rename", action: #selector(renameSelection(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Move to Trash", action: #selector(trashSelection(_:)), keyEquivalent: "")
@@ -684,6 +815,10 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         menu.addItem(withTitle: "Cut", action: #selector(cutSelection(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Copy", action: #selector(copySelection(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Paste Here", action: #selector(paste(_:)), keyEquivalent: "")
+        let copyRelativePath = menu.addItem(withTitle: "Copy Path Relative to Home", action: #selector(copyPathRelativeToHome(_:)), keyEquivalent: "")
+        copyRelativePath.target = self
+        let openTerminal = menu.addItem(withTitle: "Open in Terminal", action: #selector(openInTerminal(_:)), keyEquivalent: "")
+        openTerminal.target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Rename", action: #selector(renameSelection(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Move to Trash", action: #selector(trashSelection(_:)), keyEquivalent: "")
@@ -899,7 +1034,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         }
         if item.isDirectory {
             previewImage.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Folder")
-            previewImage.contentTintColor = .systemYellow
+            previewImage.contentTintColor = .explorerFolderTint
         } else if let image = NSImage(contentsOf: item.url) {
             previewImage.image = image
             previewImage.contentTintColor = nil
@@ -1013,7 +1148,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
             }
             if item.isDirectory {
                 cell.imageView?.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Folder")
-                cell.imageView?.contentTintColor = .systemYellow
+                cell.imageView?.contentTintColor = .explorerFolderTint
             } else {
                 cell.imageView?.image = NSWorkspace.shared.icon(forFile: item.url.path)
                 cell.imageView?.contentTintColor = nil
@@ -1086,8 +1221,19 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         breadcrumbStack.isHidden = true
         addressField.isHidden = false
         addressField.stringValue = currentURL.path
-        window?.makeFirstResponder(addressField)
-        addressField.selectText(nil)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.window?.makeFirstResponder(self.addressField)
+            self.addressField.selectText(nil)
+        }
+    }
+
+    @objc private func copyCurrentAddress(_ sender: Any?) {
+        copyStringToPasteboard(currentURL.path)
+    }
+
+    @objc private func copyCurrentAddressRelativeToHome(_ sender: Any?) {
+        copyStringToPasteboard(pathRelativeToHome(currentURL))
     }
 
     @objc func goBack(_ sender: Any?) {
@@ -1292,6 +1438,30 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         collectionView.reloadData()
     }
 
+    @objc func copyPathRelativeToHome(_ sender: Any?) {
+        copyStringToPasteboard(pathRelativeToHome(contextualLocationURL))
+    }
+
+    @objc func openInTerminal(_ sender: Any?) {
+        let target = contextualLocationURL
+        let directory = (try? target.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            ? target
+            : target.deletingLastPathComponent()
+        let candidates = [
+            URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app", isDirectory: true),
+            URL(fileURLWithPath: "/Applications/Utilities/Terminal.app", isDirectory: true)
+        ]
+        guard let terminal = candidates.first(where: { fileManager.fileExists(atPath: $0.path) }) else {
+            showError("Terminal was not found", detail: "Open Terminal and navigate to \(directory.path).")
+            return
+        }
+        NSWorkspace.shared.open(
+            [directory],
+            withApplicationAt: terminal,
+            configuration: NSWorkspace.OpenConfiguration()
+        )
+    }
+
     @objc func cutSelection(_ sender: Any?) {
         let urls = selectedItems.map(\.url)
         guard !urls.isEmpty else { return }
@@ -1334,6 +1504,29 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
     @objc private func revealSelection(_ sender: Any?) {
         let urls = selectedItems.map(\.url)
         NSWorkspace.shared.activateFileViewerSelecting(urls.isEmpty ? [currentURL] : urls)
+    }
+
+    private var contextualLocationURL: URL {
+        selectedItems.first?.url ?? currentURL
+    }
+
+    private func pathRelativeToHome(_ url: URL) -> String {
+        let homeParts = fileManager.homeDirectoryForCurrentUser.standardizedFileURL.pathComponents
+        let targetParts = url.standardizedFileURL.pathComponents
+        var commonCount = 0
+        while commonCount < min(homeParts.count, targetParts.count),
+              homeParts[commonCount] == targetParts[commonCount] {
+            commonCount += 1
+        }
+        let upward = Array(repeating: "..", count: homeParts.count - commonCount)
+        let downward = Array(targetParts.dropFirst(commonCount))
+        let relative = (upward + downward).joined(separator: "/")
+        return relative.isEmpty ? "." : relative
+    }
+
+    private func copyStringToPasteboard(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
     }
 
     private func configureNavButton(_ button: NSButton, symbol: String, help: String, action: Selector) {
@@ -1403,8 +1596,7 @@ private final class ExplorerCollectionItem: NSCollectionViewItem {
     private var iconHeight: NSLayoutConstraint!
 
     override func loadView() {
-        view = NSView()
-        view.wantsLayer = true
+        view = AppearanceSurfaceView()
         view.layer?.cornerRadius = 7
 
         icon.imageScaling = .scaleProportionallyDown
@@ -1447,7 +1639,7 @@ private final class ExplorerCollectionItem: NSCollectionViewItem {
     func configure(with item: FileItem, mode: BrowserViewMode, isCut: Bool) {
         if item.isDirectory {
             icon.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Folder")
-            icon.contentTintColor = .systemYellow
+            icon.contentTintColor = .explorerFolderTint
         } else {
             icon.image = NSWorkspace.shared.icon(forFile: item.url.path)
             icon.contentTintColor = nil
@@ -1483,8 +1675,38 @@ private final class ExplorerCollectionItem: NSCollectionViewItem {
 
     override var isSelected: Bool {
         didSet {
-            view.layer?.backgroundColor = isSelected ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.28).cgColor : NSColor.clear.cgColor
+            (view as? AppearanceSurfaceView)?.fillColor = isSelected
+                ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.28)
+                : .clear
         }
+    }
+}
+
+private final class ExplorerTableView: NSTableView {
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let clicked = row(at: convert(event.locationInWindow, from: nil))
+        if clicked >= 0 {
+            if !selectedRowIndexes.contains(clicked) {
+                selectRowIndexes(IndexSet(integer: clicked), byExtendingSelection: false)
+            }
+        } else {
+            deselectAll(nil)
+        }
+        return super.menu(for: event)
+    }
+}
+
+private final class ExplorerCollectionView: NSCollectionView {
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        if let clicked = indexPathForItem(at: point) {
+            if !selectionIndexPaths.contains(clicked) {
+                selectItems(at: [clicked], scrollPosition: [])
+            }
+        } else {
+            deselectItems(at: selectionIndexPaths)
+        }
+        return super.menu(for: event)
     }
 }
 
@@ -1492,12 +1714,64 @@ private final class PathButton: NSButton {
     var destinationURL: URL?
 }
 
-private final class BreadcrumbView: NSView {
+private class AppearanceSurfaceView: NSView {
+    var fillColor: NSColor = .clear {
+        didSet { needsDisplay = true }
+    }
+    var strokeColor: NSColor? {
+        didSet { needsDisplay = true }
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = fillColor.resolvedColor(with: effectiveAppearance).cgColor
+        layer?.borderColor = strokeColor?.resolvedColor(with: effectiveAppearance).cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateLayer()
+    }
+}
+
+private final class BreadcrumbView: AppearanceSurfaceView {
     var onBackgroundClick: (() -> Void)?
 
     override func mouseDown(with event: NSEvent) {
         super.mouseDown(with: event)
         onBackgroundClick?()
+    }
+}
+
+private extension Array {
+    subscript(safe index: Index) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
+private extension NSColor {
+    static let explorerFolderTint = NSColor(name: "OpenExplorerFolderTint") { appearance in
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return isDark
+            ? NSColor(deviceRed: 0.89, green: 0.64, blue: 0.03, alpha: 1)
+            : NSColor(deviceRed: 0.82, green: 0.55, blue: 0.00, alpha: 1)
+    }
+
+    func resolvedColor(with appearance: NSAppearance) -> NSColor {
+        var resolved = self
+        appearance.performAsCurrentDrawingAppearance {
+            resolved = usingColorSpace(.deviceRGB) ?? self
+        }
+        return resolved
+    }
+
+    func isVisuallyEqual(to other: NSColor, tolerance: CGFloat = 0.02) -> Bool {
+        guard let lhs = usingColorSpace(.deviceRGB), let rhs = other.usingColorSpace(.deviceRGB) else { return false }
+        return abs(lhs.redComponent - rhs.redComponent) <= tolerance
+            && abs(lhs.greenComponent - rhs.greenComponent) <= tolerance
+            && abs(lhs.blueComponent - rhs.blueComponent) <= tolerance
+            && abs(lhs.alphaComponent - rhs.alphaComponent) <= tolerance
     }
 }
 

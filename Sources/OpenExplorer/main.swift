@@ -55,8 +55,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             FileHandle.standardError.write(Data("FAIL: OpenExplorer keyboard shortcuts are not routed to the browser window\n".utf8))
             exit(1)
         }
+        let appearanceFailures = browserWindow?.appearanceSmokeTestFailures() ?? ["browser window is unavailable"]
+        guard appearanceFailures.isEmpty else {
+            FileHandle.standardError.write(Data("FAIL: OpenExplorer does not adapt cleanly to light and dark appearance: \(appearanceFailures.joined(separator: ", "))\n".utf8))
+            exit(1)
+        }
+        let interactionFailures = browserWindow?.interactionSmokeTestFailures() ?? ["browser window is unavailable"]
+        guard interactionFailures.isEmpty else {
+            FileHandle.standardError.write(Data("FAIL: OpenExplorer location actions are incomplete: \(interactionFailures.joined(separator: ", "))\n".utf8))
+            exit(1)
+        }
+        let columnFailures = browserWindow?.listColumnTransitionSmokeTestFailures() ?? ["browser window is unavailable"]
+        guard columnFailures.isEmpty else {
+            FileHandle.standardError.write(Data("FAIL: OpenExplorer List columns are unstable after a view-mode round trip: \(columnFailures.joined(separator: ", "))\n".utf8))
+            exit(1)
+        }
         print("PASS: OpenExplorer launched with a visible key window")
         print("PASS: Command-N, Command-C, and Command-V are routed to the browser window")
+        print("PASS: OpenExplorer surfaces adapt to light and dark appearance")
+        print("PASS: Address editing and folder location actions are available")
+        print("PASS: List column widths remain stable after changing view modes")
         fflush(stdout)
         NSApp.terminate(nil)
     }
@@ -114,11 +132,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let goItem = NSMenuItem()
         let goMenu = NSMenu(title: "Go")
-        goMenu.addItem(withTitle: "Back", action: #selector(BrowserWindowController.goBack(_:)), keyEquivalent: "[")
-        goMenu.addItem(withTitle: "Forward", action: #selector(BrowserWindowController.goForward(_:)), keyEquivalent: "]")
-        goMenu.addItem(withTitle: "Enclosing Folder", action: #selector(BrowserWindowController.goUp(_:)), keyEquivalent: "\u{2191}").keyEquivalentModifierMask = [.command]
-        goMenu.addItem(withTitle: "Location…", action: #selector(BrowserWindowController.focusAddress(_:)), keyEquivalent: "l")
-        goMenu.addItem(withTitle: "Reload", action: #selector(BrowserWindowController.reload(_:)), keyEquivalent: "r")
+        let back = goMenu.addItem(withTitle: "Back", action: #selector(BrowserWindowController.goBack(_:)), keyEquivalent: "[")
+        back.target = browserWindow
+        let forward = goMenu.addItem(withTitle: "Forward", action: #selector(BrowserWindowController.goForward(_:)), keyEquivalent: "]")
+        forward.target = browserWindow
+        let enclosing = goMenu.addItem(withTitle: "Enclosing Folder", action: #selector(BrowserWindowController.goUp(_:)), keyEquivalent: "\u{2191}")
+        enclosing.keyEquivalentModifierMask = [.command]
+        enclosing.target = browserWindow
+        let location = goMenu.addItem(withTitle: "Location…", action: #selector(BrowserWindowController.focusAddress(_:)), keyEquivalent: "l")
+        location.target = browserWindow
+        let reload = goMenu.addItem(withTitle: "Reload", action: #selector(BrowserWindowController.reload(_:)), keyEquivalent: "r")
+        reload.target = browserWindow
         goItem.submenu = goMenu
         mainMenu.addItem(goItem)
 
