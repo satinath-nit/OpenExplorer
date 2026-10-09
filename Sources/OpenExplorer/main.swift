@@ -1,8 +1,65 @@
 import AppKit
+import Carbon
+
+@MainActor
+final class GlobalHotKey {
+    private var hotKeyRef: EventHotKeyRef?
+    private var eventHandlerRef: EventHandlerRef?
+    private let action: @MainActor () -> Void
+
+    init?(keyCode: UInt32, modifiers: UInt32, action: @escaping @MainActor () -> Void) {
+        self.action = action
+
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        let handlerStatus = InstallEventHandler(
+            GetApplicationEventTarget(),
+            { _, _, userData in
+                guard let userData else { return OSStatus(eventNotHandledErr) }
+                let hotKey = Unmanaged<GlobalHotKey>.fromOpaque(userData).takeUnretainedValue()
+                MainActor.assumeIsolated {
+                    hotKey.action()
+                }
+                return noErr
+            },
+            1,
+            &eventType,
+            Unmanaged.passUnretained(self).toOpaque(),
+            &eventHandlerRef
+        )
+        guard handlerStatus == noErr else { return nil }
+
+        let hotKeyID = EventHotKeyID(signature: OSType(0x4F584550), id: 1) // "OXEP"
+        let registrationStatus = RegisterEventHotKey(
+            keyCode,
+            modifiers,
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &hotKeyRef
+        )
+        guard registrationStatus == noErr else {
+            if let eventHandlerRef { RemoveEventHandler(eventHandlerRef) }
+            return nil
+        }
+    }
+
+    var isRegistered: Bool { hotKeyRef != nil }
+
+    func triggerForTesting() { action() }
+
+    isolated deinit {
+        if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
+        if let eventHandlerRef { RemoveEventHandler(eventHandlerRef) }
+    }
+}
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var browserWindow: BrowserWindowController?
+    private var globalOpenShortcut: GlobalHotKey?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -11,6 +68,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let controller = BrowserWindowController()
         browserWindow = controller
+        globalOpenShortcut = GlobalHotKey(
+            keyCode: UInt32(kVK_ANSI_E),
+            modifiers: UInt32(cmdKey)
+        ) { [weak self] in
+            self?.presentMainWindow()
+        }
         configureMenu()
         presentMainWindow()
 
@@ -23,7 +86,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    // Match Finder and other document-style macOS apps: closing the last window
+    // leaves the application running in the Dock until the user explicitly quits.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 
@@ -70,11 +135,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             FileHandle.standardError.write(Data("FAIL: OpenExplorer List columns are unstable after a view-mode round trip: \(columnFailures.joined(separator: ", "))\n".utf8))
             exit(1)
         }
+        guard !applicationShouldTerminateAfterLastWindowClosed(NSApp) else {
+            FileHandle.standardError.write(Data("FAIL: OpenExplorer terminates when its last window closes\n".utf8))
+            exit(1)
+        }
+        guard globalOpenShortcut?.isRegistered == true else {
+            FileHandle.standardError.write(Data("FAIL: Command-E global OpenExplorer shortcut is not registered\n".utf8))
+            exit(1)
+        }
+
+        window.performClose(nil)
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window, !window.isVisible else {
+                FileHandle.standardError.write(Data("FAIL: OpenExplorer window did not close cleanly\n".utf8))
+                exit(1)
+            }
+            self.globalOpenShortcut?.triggerForTesting()
+            guard window.isVisible, window.isKeyWindow else {
+                FileHandle.standardError.write(Data("FAIL: Command-E did not restore the OpenExplorer window\n".utf8))
+                exit(1)
+            }
+            self.finishSuccessfulSmokeTest()
+        }
+    }
+
+    private func finishSuccessfulSmokeTest() {
         print("PASS: OpenExplorer launched with a visible key window")
         print("PASS: Command-N, Command-C, and Command-V are routed to the browser window")
         print("PASS: OpenExplorer surfaces adapt to light and dark appearance")
         print("PASS: Address editing and folder location actions are available")
         print("PASS: List column widths remain stable after changing view modes")
+        print("PASS: Closing the last window keeps OpenExplorer running and Dock reopen restores it")
+        print("PASS: Command-E is registered globally and restores the OpenExplorer window")
         fflush(stdout)
         NSApp.terminate(nil)
     }

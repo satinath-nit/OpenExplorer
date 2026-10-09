@@ -19,7 +19,9 @@ Designed and developed by Satinath Mondal.
 - Quick Look integration and optional hidden-file display
 - Folder context actions to copy a home-relative path or open the location in Terminal
 - Persistent last folder, favorites, pane choices, and view mode
+- Finder-style app lifecycle: closing the last window keeps OpenExplorer in the Dock, ready to reopen
 - Native shortcuts including `⌘N` New Tab, `⌘C` Copy, `⌘V` Paste, `⇧⌘N` New Folder, and `⌘L` Location
+- System-wide `⌘E` shortcut to bring OpenExplorer forward or restore its closed window while it is running in the Dock
 
 ## System requirements
 
@@ -80,7 +82,7 @@ This builds the shared core and runs its checks. After packaging, run the UI sta
 ./scripts/smoke-test-app.sh
 ```
 
-The smoke test verifies that the application opens a visible key window, adapts to light and dark appearance, exposes address and folder-location actions, and routes `⌘N`, `⌘C`, and `⌘V` to the explorer window.
+The smoke test verifies that the application opens a visible key window, adapts to light and dark appearance, exposes address and folder-location actions, preserves List columns across view changes, remains running after its last window closes, reopens from the Dock, and routes `⌘N`, `⌘C`, and `⌘V` to the explorer window.
 
 ## Build the macOS application and DMG
 
@@ -103,10 +105,10 @@ release/OpenExplorer.app
 release/OpenExplorer-<version>-<architecture>.dmg
 ```
 
-For example, an Apple-silicon build of version 1.3.1 produces:
+For example, an Apple-silicon build of version 1.4.0 produces:
 
 ```text
-release/OpenExplorer-1.3.1-arm64.dmg
+release/OpenExplorer-1.4.0-arm64.dmg
 ```
 
 To request a specific architecture supported by the installed toolchain:

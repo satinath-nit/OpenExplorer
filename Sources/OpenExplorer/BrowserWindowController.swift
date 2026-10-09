@@ -122,6 +122,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         )
         window.title = "OpenExplorer"
         window.minSize = NSSize(width: 980, height: 620)
+        window.isReleasedWhenClosed = false
         window.center()
         super.init(window: window)
         window.delegate = self

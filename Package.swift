@@ -14,7 +14,8 @@ let package = Package(
             name: "OpenExplorer",
             dependencies: ["OpenExplorerCore"],
             linkerSettings: [
-                .linkedFramework("AppKit")
+                .linkedFramework("AppKit"),
+                .linkedFramework("Carbon")
             ]
         ),
         .executableTarget(name: "OpenExplorerCoreChecks", dependencies: ["OpenExplorerCore"])
