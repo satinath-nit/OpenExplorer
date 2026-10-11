@@ -208,6 +208,36 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         return failures
     }
 
+    func dragExportSmokeTestFailures() -> [String] {
+        let originalItems = visibleItems
+        defer {
+            visibleItems = originalItems
+            tableView.reloadData()
+            collectionView.reloadData()
+        }
+
+        let folderURL = fileManager.homeDirectoryForCurrentUser
+        let fileURL = Bundle.main.executableURL ?? folderURL.appendingPathComponent("OpenExplorer")
+        visibleItems = [
+            FileItem(url: fileURL, name: fileURL.lastPathComponent, isDirectory: false, size: 0, modified: nil, created: nil),
+            FileItem(url: folderURL, name: folderURL.lastPathComponent, isDirectory: true, size: 0, modified: nil, created: nil)
+        ]
+
+        var failures: [String] = []
+        for index in visibleItems.indices {
+            let expectedURL = visibleItems[index].url.standardizedFileURL
+            let tableURL = (tableView(tableView, pasteboardWriterForRow: index) as? NSURL).map { $0 as URL }?.standardizedFileURL
+            if tableURL != expectedURL {
+                failures.append("list view does not export \(visibleItems[index].name) as a file URL")
+            }
+            let collectionURL = (collectionView(collectionView, pasteboardWriterForItemAt: IndexPath(item: index, section: 0)) as? NSURL).map { $0 as URL }?.standardizedFileURL
+            if collectionURL != expectedURL {
+                failures.append("icon view does not export \(visibleItems[index].name) as a file URL")
+            }
+        }
+        return failures
+    }
+
     func listColumnTransitionSmokeTestFailures() -> [String] {
         guard let window else { return ["window is unavailable"] }
         let originalMode = viewMode
@@ -775,6 +805,8 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         tableView.delegate = self
         tableView.target = self
         tableView.doubleAction = #selector(openSelection(_:))
+        tableView.setDraggingSourceOperationMask(.copy, forLocal: false)
+        tableView.setDraggingSourceOperationMask(.copy, forLocal: true)
 
         let name = tableColumn("name", title: "Name", width: 390, min: 200)
         name.sortDescriptorPrototype = NSSortDescriptor(key: "name", ascending: true, selector: #selector(NSString.localizedStandardCompare(_:)))
@@ -824,6 +856,8 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         collectionView.isSelectable = true
         collectionView.allowsMultipleSelection = true
         collectionView.backgroundColors = [.controlBackgroundColor]
+        collectionView.setDraggingSourceOperationMask(.copy, forLocal: false)
+        collectionView.setDraggingSourceOperationMask(.copy, forLocal: true)
         let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(collectionDoubleClicked(_:)))
         doubleClick.numberOfClicksRequired = 2
         collectionView.addGestureRecognizer(doubleClick)
@@ -1218,6 +1252,15 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
         syncSortPopup()
         applyFilterAndSort()
+    }
+    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
+        guard visibleItems.indices.contains(row) else { return nil }
+        return visibleItems[row].url as NSURL
+    }
+
+    func collectionView(_ collectionView: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
+        guard visibleItems.indices.contains(indexPath.item) else { return nil }
+        return visibleItems[indexPath.item].url as NSURL
     }
     func controlTextDidChange(_ obj: Notification) { if obj.object as? NSSearchField === searchField { applyFilterAndSort() } }
     func controlTextDidEndEditing(_ obj: Notification) {

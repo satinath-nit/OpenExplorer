@@ -137,6 +137,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             FileHandle.standardError.write(Data("FAIL: OpenExplorer location actions are incomplete: \(interactionFailures.joined(separator: ", "))\n".utf8))
             exit(1)
         }
+        let dragFailures = browserWindow?.dragExportSmokeTestFailures() ?? ["browser window is unavailable"]
+        guard dragFailures.isEmpty else {
+            FileHandle.standardError.write(Data("FAIL: OpenExplorer cannot drag files and folders to other apps: \(dragFailures.joined(separator: ", "))\n".utf8))
+            exit(1)
+        }
         let columnFailures = browserWindow?.listColumnTransitionSmokeTestFailures() ?? ["browser window is unavailable"]
         guard columnFailures.isEmpty else {
             FileHandle.standardError.write(Data("FAIL: OpenExplorer List columns are unstable after a view-mode round trip: \(columnFailures.joined(separator: ", "))\n".utf8))
@@ -172,6 +177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         print("PASS: Command-N, Command-C, and Command-V are routed to the browser window")
         print("PASS: OpenExplorer surfaces adapt to light and dark appearance")
         print("PASS: Address editing and folder location actions are available")
+        print("PASS: List and icon views export files and folders to other apps")
         print("PASS: List column widths remain stable after changing view modes")
         print("PASS: Closing the last window keeps OpenExplorer running and Dock reopen restores it")
         print("PASS: Command-E is registered globally and restores the OpenExplorer window")
