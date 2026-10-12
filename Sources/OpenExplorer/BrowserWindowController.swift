@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import OpenExplorerCore
+import UniformTypeIdentifiers
 
 private struct FileItem {
     let url: URL
@@ -54,7 +55,7 @@ private enum BrowserViewMode: Int, CaseIterable {
 }
 
 @MainActor
-final class BrowserWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSCollectionViewDataSource, NSCollectionViewDelegate, NSSearchFieldDelegate, NSTextFieldDelegate {
+final class BrowserWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSCollectionViewDataSource, NSCollectionViewDelegate, NSSearchFieldDelegate, NSTextFieldDelegate, NSMenuDelegate {
     private let fileManager = FileManager.default
     private var tabs: [BrowserTab]
     private var activeTabIndex = 0
@@ -66,6 +67,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
     private var favoriteURLs: [URL] = []
     private var cutURLs: Set<URL> = []
     private var showHiddenFiles = false
+    private var textEditors: [TextEditorWindowController] = []
 
     private let tabStack = NSStackView()
     private let breadcrumbStack = NSStackView()
@@ -176,7 +178,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         if !addressField.isEditable || !addressField.isSelectable {
             failures.append("address field is not editable and selectable")
         }
-        let expectedContextActions = ["Copy Path Relative to Home", "Open in Terminal"]
+        let expectedContextActions = ["Edit in OpenExplorer", "Copy Path Relative to Home", "Open in Terminal"]
         for title in expectedContextActions {
             if tableView.menu?.item(withTitle: title)?.target !== self {
                 failures.append("list context menu is missing \(title)")
@@ -190,6 +192,9 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
             if newMenu?.item(withTitle: "New Folder")?.target !== self
                 || newMenu?.item(withTitle: "New Blank File…")?.target !== self {
                 failures.append("context menu is missing New Folder or New Blank File")
+            }
+            if menu?.item(withTitle: "Open With")?.submenu?.item(withTitle: "Choose Application…")?.target !== self {
+                failures.append("Open With is missing Choose Application")
             }
         }
         if breadcrumbContainer.menu?.item(withTitle: "Copy Address")?.target !== self
@@ -829,25 +834,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
                 ascending: FileItemSorter.defaultAscending
             )
         ]
-        let menu = NSMenu()
-        addNewSubmenu(to: menu)
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Open", action: #selector(openSelection(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Quick Look", action: #selector(quickLook(_:)), keyEquivalent: "")
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Add to Favorites", action: #selector(addFavorite(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Cut", action: #selector(cutSelection(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Copy", action: #selector(copySelection(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Paste Here", action: #selector(paste(_:)), keyEquivalent: "")
-        let copyRelativePath = menu.addItem(withTitle: "Copy Path Relative to Home", action: #selector(copyPathRelativeToHome(_:)), keyEquivalent: "")
-        copyRelativePath.target = self
-        let openTerminal = menu.addItem(withTitle: "Open in Terminal", action: #selector(openInTerminal(_:)), keyEquivalent: "")
-        openTerminal.target = self
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Rename", action: #selector(renameSelection(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Move to Trash", action: #selector(trashSelection(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Reveal in Finder", action: #selector(revealSelection(_:)), keyEquivalent: "")
-        tableView.menu = menu
+        tableView.menu = makeItemContextMenu(includesRevealInFinder: true)
     }
 
     private func configureCollectionView() {
@@ -862,24 +849,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         doubleClick.numberOfClicksRequired = 2
         collectionView.addGestureRecognizer(doubleClick)
 
-        let menu = NSMenu()
-        addNewSubmenu(to: menu)
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Open", action: #selector(openSelection(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Quick Look", action: #selector(quickLook(_:)), keyEquivalent: "")
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Add to Favorites", action: #selector(addFavorite(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Cut", action: #selector(cutSelection(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Copy", action: #selector(copySelection(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Paste Here", action: #selector(paste(_:)), keyEquivalent: "")
-        let copyRelativePath = menu.addItem(withTitle: "Copy Path Relative to Home", action: #selector(copyPathRelativeToHome(_:)), keyEquivalent: "")
-        copyRelativePath.target = self
-        let openTerminal = menu.addItem(withTitle: "Open in Terminal", action: #selector(openInTerminal(_:)), keyEquivalent: "")
-        openTerminal.target = self
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Rename", action: #selector(renameSelection(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Move to Trash", action: #selector(trashSelection(_:)), keyEquivalent: "")
-        collectionView.menu = menu
+        collectionView.menu = makeItemContextMenu(includesRevealInFinder: false)
     }
 
     private func buildPreviewPanel() {
@@ -1464,6 +1434,61 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         else { NSWorkspace.shared.open(item.url) }
     }
 
+    @objc func editInOpenExplorer(_ sender: Any?) {
+        guard selectedItems.count == 1, let item = selectedItems.first, !item.isDirectory else { return }
+        do {
+            let editor = try TextEditorWindowController(fileURL: item.url)
+            textEditors.append(editor)
+            editor.onClose = { [weak self, weak editor] in
+                guard let self, let editor else { return }
+                self.textEditors.removeAll { $0 === editor }
+                self.reloadContents()
+            }
+            editor.showWindow(nil)
+            editor.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } catch {
+            showError("Could not edit “\(item.name)”", detail: error.localizedDescription)
+        }
+    }
+
+    @objc private func openWithApplication(_ sender: NSMenuItem) {
+        guard let applicationURL = sender.representedObject as? URL else { return }
+        openSelection(with: applicationURL)
+    }
+
+    @objc private func chooseApplication(_ sender: Any?) {
+        let selection = selectedItems.map(\.url)
+        guard !selection.isEmpty, let window else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Choose an Application"
+        panel.prompt = "Open"
+        panel.message = "Choose an application to open \(selection.count == 1 ? "“\(selection[0].lastPathComponent)”" : "the selected items")."
+        panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowedContentTypes = [.application]
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let applicationURL = panel.url else { return }
+            self?.openSelection(with: applicationURL)
+        }
+    }
+
+    private func openSelection(with applicationURL: URL) {
+        let urls = selectedItems.map(\.url)
+        guard !urls.isEmpty else { return }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.open(urls, withApplicationAt: applicationURL, configuration: configuration) { [weak self] _, error in
+            guard let error else { return }
+            Task { @MainActor in
+                self?.showError("Could not open the selection", detail: error.localizedDescription)
+            }
+        }
+    }
+
     @objc func quickLook(_ sender: Any?) {
         let selection = selectedItems
         guard !selection.isEmpty else { return }
@@ -1472,6 +1497,23 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         process.arguments = ["-p"] + selection.map { $0.url.path }
         do { try process.run() }
         catch { showError("Could not open Quick Look", detail: error.localizedDescription) }
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        if menu.title == "Open With" {
+            populateOpenWithMenu(menu)
+            return
+        }
+        let canEdit = selectedItems.count == 1
+            && selectedItems.first?.isDirectory == false
+            && selectedItems.first.map { TextEditorWindowController.canOpen($0.url) } == true
+        menu.item(withTitle: "Edit in OpenExplorer")?.isEnabled = canEdit
+        menu.item(withTitle: "Open With")?.isEnabled = !selectedItems.isEmpty
+        menu.item(withTitle: "Quick Look")?.isEnabled = !selectedItems.isEmpty
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu.title == "Open With" { populateOpenWithMenu(menu) }
     }
 
     @objc func addFavorite(_ sender: Any?) {
@@ -1656,6 +1698,100 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         button.bezelStyle = .texturedRounded
         button.toolTip = help
         return button
+    }
+
+    private func makeItemContextMenu(includesRevealInFinder: Bool) -> NSMenu {
+        let menu = NSMenu()
+        menu.delegate = self
+        addNewSubmenu(to: menu)
+        menu.addItem(.separator())
+
+        let open = menu.addItem(withTitle: "Open", action: #selector(openSelection(_:)), keyEquivalent: "")
+        open.target = self
+        let openWithItem = menu.addItem(withTitle: "Open With", action: nil, keyEquivalent: "")
+        openWithItem.submenu = makeOpenWithMenu()
+        let quickLookItem = menu.addItem(withTitle: "Quick Look", action: #selector(quickLook(_:)), keyEquivalent: "")
+        quickLookItem.target = self
+        let edit = menu.addItem(withTitle: "Edit in OpenExplorer", action: #selector(editInOpenExplorer(_:)), keyEquivalent: "")
+        edit.image = NSImage(systemSymbolName: "pencil.and.outline", accessibilityDescription: "Edit in OpenExplorer")
+        edit.target = self
+
+        menu.addItem(.separator())
+        let favorite = menu.addItem(withTitle: "Add to Favorites", action: #selector(addFavorite(_:)), keyEquivalent: "")
+        favorite.target = self
+        let cut = menu.addItem(withTitle: "Cut", action: #selector(cutSelection(_:)), keyEquivalent: "")
+        cut.target = self
+        let copy = menu.addItem(withTitle: "Copy", action: #selector(copySelection(_:)), keyEquivalent: "")
+        copy.target = self
+        let paste = menu.addItem(withTitle: "Paste Here", action: #selector(paste(_:)), keyEquivalent: "")
+        paste.target = self
+        let copyRelativePath = menu.addItem(withTitle: "Copy Path Relative to Home", action: #selector(copyPathRelativeToHome(_:)), keyEquivalent: "")
+        copyRelativePath.target = self
+        let openTerminal = menu.addItem(withTitle: "Open in Terminal", action: #selector(openInTerminal(_:)), keyEquivalent: "")
+        openTerminal.target = self
+
+        menu.addItem(.separator())
+        let rename = menu.addItem(withTitle: "Rename", action: #selector(renameSelection(_:)), keyEquivalent: "")
+        rename.target = self
+        let trash = menu.addItem(withTitle: "Move to Trash", action: #selector(trashSelection(_:)), keyEquivalent: "")
+        trash.target = self
+        if includesRevealInFinder {
+            let reveal = menu.addItem(withTitle: "Reveal in Finder", action: #selector(revealSelection(_:)), keyEquivalent: "")
+            reveal.target = self
+        }
+        return menu
+    }
+
+    private func makeOpenWithMenu() -> NSMenu {
+        let menu = NSMenu(title: "Open With")
+        menu.delegate = self
+        addChooseApplicationItem(to: menu)
+        return menu
+    }
+
+    private func populateOpenWithMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+        guard let fileURL = selectedItems.first?.url else {
+            let unavailable = menu.addItem(withTitle: "No file selected", action: nil, keyEquivalent: "")
+            unavailable.isEnabled = false
+            menu.addItem(.separator())
+            addChooseApplicationItem(to: menu)
+            return
+        }
+
+        var applications = NSWorkspace.shared.urlsForApplications(toOpen: fileURL)
+        if TextEditorWindowController.canOpen(fileURL),
+           let textEdit = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.TextEdit") {
+            applications.append(textEdit)
+        }
+        let ownBundleURL = Bundle.main.bundleURL.standardizedFileURL
+        var seenPaths = Set<String>()
+        applications = applications
+            .filter { $0.standardizedFileURL != ownBundleURL && seenPaths.insert($0.standardizedFileURL.path).inserted }
+            .sorted { $0.deletingPathExtension().lastPathComponent.localizedStandardCompare($1.deletingPathExtension().lastPathComponent) == .orderedAscending }
+
+        if applications.isEmpty {
+            let unavailable = menu.addItem(withTitle: "No compatible applications found", action: nil, keyEquivalent: "")
+            unavailable.isEnabled = false
+        } else {
+            for applicationURL in applications {
+                let name = applicationURL.deletingPathExtension().lastPathComponent
+                let item = menu.addItem(withTitle: name, action: #selector(openWithApplication(_:)), keyEquivalent: "")
+                let icon = NSWorkspace.shared.icon(forFile: applicationURL.path)
+                icon.size = NSSize(width: 16, height: 16)
+                item.image = icon
+                item.representedObject = applicationURL
+                item.target = self
+            }
+        }
+        menu.addItem(.separator())
+        addChooseApplicationItem(to: menu)
+    }
+
+    private func addChooseApplicationItem(to menu: NSMenu) {
+        let choose = menu.addItem(withTitle: "Choose Application…", action: #selector(chooseApplication(_:)), keyEquivalent: "")
+        choose.image = NSImage(systemSymbolName: "app.badge", accessibilityDescription: "Choose Application")
+        choose.target = self
     }
 
     private func makeNewMenu() -> NSMenu {
