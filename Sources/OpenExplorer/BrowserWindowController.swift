@@ -68,6 +68,8 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
     private var cutURLs: Set<URL> = []
     private var showHiddenFiles = false
     private var textEditors: [TextEditorWindowController] = []
+    private var directoryMonitor: DirectoryMonitor?
+    private var pendingDirectoryReload: DispatchWorkItem?
 
     private let tabStack = NSStackView()
     private let breadcrumbStack = NSStackView()
@@ -923,6 +925,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         rebuildTabs()
         rebuildBreadcrumbs()
         reloadContents()
+        startMonitoringCurrentDirectory()
         updateNavigationButtons()
         updateSidebarSelection()
     }
@@ -965,7 +968,8 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         renderActiveTab()
     }
 
-    private func reloadContents() {
+    private func reloadContents(preservingSelection: Bool = false) {
+        let selectedPaths = preservingSelection ? Set(selectedItems.map { $0.url.standardizedFileURL.path }) : []
         do {
             let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey, .nameKey]
             let urls = try fileManager.contentsOfDirectory(
@@ -985,6 +989,16 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
                 )
             }
             applyFilterAndSort()
+            if preservingSelection, !selectedPaths.isEmpty {
+                let indexes = IndexSet(visibleItems.indices.filter { selectedPaths.contains(visibleItems[$0].url.standardizedFileURL.path) })
+                if viewMode.usesIconGrid {
+                    collectionView.selectItems(at: Set(indexes.map { IndexPath(item: $0, section: 0) }), scrollPosition: [])
+                } else {
+                    tableView.selectRowIndexes(indexes, byExtendingSelection: false)
+                }
+                updateStatus()
+                updatePreview()
+            }
         } catch {
             items = []
             visibleItems = []
@@ -992,6 +1006,29 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
             collectionView.reloadData()
             showError("Could not open folder", detail: error.localizedDescription)
         }
+    }
+
+    private func startMonitoringCurrentDirectory() {
+        directoryMonitor?.stop()
+        pendingDirectoryReload?.cancel()
+        let monitoredURL = currentURL.standardizedFileURL
+        directoryMonitor = try? DirectoryMonitor(url: monitoredURL) { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.scheduleDirectoryReload(for: monitoredURL)
+            }
+        }
+        directoryMonitor?.start()
+    }
+
+    private func scheduleDirectoryReload(for monitoredURL: URL) {
+        guard currentURL.standardizedFileURL == monitoredURL else { return }
+        pendingDirectoryReload?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.currentURL.standardizedFileURL == monitoredURL else { return }
+            self.reloadContents(preservingSelection: true)
+        }
+        pendingDirectoryReload = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
     }
 
     private func applyFilterAndSort() {
@@ -1431,7 +1468,41 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
     @objc func openSelection(_ sender: Any?) {
         guard let item = selectedItems.first else { return }
         if item.isDirectory { navigate(to: item.url) }
+        else if item.url.pathExtension.lowercased() == "zip" { extractZip(item.url) }
         else { NSWorkspace.shared.open(item.url) }
+    }
+
+    private func extractZip(_ archiveURL: URL) {
+        statusLabel.stringValue = "Extracting \(archiveURL.lastPathComponent)…"
+        Task { [weak self] in
+            do {
+                let destination = try await Task.detached(priority: .userInitiated) {
+                    try ZipExtractor.extract(archiveURL)
+                }.value
+                guard let self else { return }
+                self.reloadContents()
+                self.selectItem(at: destination)
+                self.statusLabel.stringValue = "Extracted to \(destination.lastPathComponent)"
+            } catch {
+                guard let self else { return }
+                self.reloadContents(preservingSelection: true)
+                self.showError("Could not extract \(archiveURL.lastPathComponent)", detail: error.localizedDescription)
+            }
+        }
+    }
+
+    private func selectItem(at url: URL) {
+        guard let index = visibleItems.firstIndex(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) else { return }
+        if viewMode.usesIconGrid {
+            let indexPath = IndexPath(item: index, section: 0)
+            collectionView.selectItems(at: [indexPath], scrollPosition: [.centeredVertically])
+            collectionView.scrollToItems(at: [indexPath], scrollPosition: [.centeredVertically])
+        } else {
+            tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            tableView.scrollRowToVisible(index)
+        }
+        updateStatus()
+        updatePreview()
     }
 
     @objc func editInOpenExplorer(_ sender: Any?) {

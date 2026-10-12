@@ -87,4 +87,41 @@ do {
     // Expected.
 }
 
+let liveRefreshDirectory = creationTestDirectory.appendingPathComponent("live-refresh", isDirectory: true)
+try FileManager.default.createDirectory(at: liveRefreshDirectory, withIntermediateDirectories: false)
+let changeObserved = DispatchSemaphore(value: 0)
+let directoryMonitor = try DirectoryMonitor(url: liveRefreshDirectory) {
+    changeObserved.signal()
+}
+directoryMonitor.start()
+try FileManager.default.createDirectory(
+    at: liveRefreshDirectory.appendingPathComponent("externally-created-folder", isDirectory: true),
+    withIntermediateDirectories: false
+)
+require(
+    changeObserved.wait(timeout: .now() + 2) == .success,
+    "External folder creation should notify OpenExplorer without a manual refresh"
+)
+directoryMonitor.stop()
+
+let zipSource = creationTestDirectory.appendingPathComponent("zip-source", isDirectory: true)
+try FileManager.default.createDirectory(at: zipSource, withIntermediateDirectories: false)
+try Data("OpenExplorer ZIP check".utf8).write(to: zipSource.appendingPathComponent("payload.txt"))
+let zipArchive = creationTestDirectory.appendingPathComponent("sample.zip")
+let createArchive = Process()
+createArchive.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+createArchive.arguments = ["-c", "-k", "--keepParent", zipSource.path, zipArchive.path]
+try createArchive.run()
+createArchive.waitUntilExit()
+require(createArchive.terminationStatus == 0, "ZIP test fixture should be created")
+let extractedFolder = try ZipExtractor.extract(zipArchive)
+require(
+    FileManager.default.fileExists(atPath: extractedFolder.appendingPathComponent("zip-source/payload.txt").path),
+    "ZIP extraction should create a visible neighboring folder without Finder"
+)
+require(
+    ZipExtractor.uniqueDestination(for: zipArchive).lastPathComponent == "sample 2",
+    "Repeated ZIP extraction should choose a non-destructive folder name"
+)
+
 print("OpenExplorerCore checks passed")

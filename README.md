@@ -3,7 +3,7 @@
 OpenExplorer is a native, open-source macOS file manager for people who prefer the direct navigation and layout choices of Windows File Explorer. It is written in Swift with AppKit, runs fully offline, and has no third-party runtime dependencies.
 
 <!-- BEGIN LATEST DOWNLOAD BUTTON -->
-[![Download DMG FIle](https://custom-icon-badges.demolab.com/badge/-Download-blue?style=for-the-badge&logo=download&logoColor=white "Download zip")](https://github.com/satinath-nit/OpenExplorer/releases/download/1.6.0/OpenExplorer-arm64.dmg)
+[![Download DMG FIle](https://custom-icon-badges.demolab.com/badge/-Download-blue?style=for-the-badge&logo=download&logoColor=white "Download zip")](https://github.com/satinath-nit/OpenExplorer/releases/download/1.6.1/OpenExplorer-arm64.dmg)
 <!-- END LATEST DOWNLOAD BUTTON -->
 
 ![OpenExplorer](./OpenExplorer.jpeg)
@@ -21,6 +21,8 @@ OpenExplorer is a native, open-source macOS file manager for people who prefer t
 - Back and forward history for each tab
 - Create folders and blank files of any type, then open, rename, copy, cut, paste, or move items to the macOS Trash
 - Drag files and folders from List or icon views into other macOS applications
+- Extract ZIP archives directly inside OpenExplorer without opening Finder; extracted folders appear automatically and use a safe numbered name when needed
+- Live folder monitoring keeps the current view synchronized with downloads, Archive Utility, Terminal, and other applications without requiring a manual refresh
 - Quick Look integration remains available for native macOS previews, alongside an **Open With** menu that discovers compatible installed applications and provides **Choose Application…**
 - Built-in plain-text editor for dotfiles and text files such as `.zshrc`, `.bashrc`, `.env`, Markdown, JSON, and source code, with line numbers, Find, line wrapping, external-change protection, and `⌘S` Save
 - Optional hidden-file display
@@ -112,10 +114,10 @@ release/OpenExplorer.app
 release/OpenExplorer-<version>-<architecture>.dmg
 ```
 
-For example, an Apple-silicon build of version 1.6.0 produces:
+For example, an Apple-silicon build of version 1.6.1 produces:
 
 ```text
-release/OpenExplorer-1.6.0-arm64.dmg
+release/OpenExplorer-1.6.1-arm64.dmg
 ```
 
 To request a specific architecture supported by the installed toolchain:
