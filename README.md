@@ -3,7 +3,7 @@
 OpenExplorer is a native, open-source macOS file manager for people who prefer the direct navigation and layout choices of Windows File Explorer. It is written in Swift with AppKit, runs fully offline, and has no third-party runtime dependencies.
 
 <!-- BEGIN LATEST DOWNLOAD BUTTON -->
-[![Download DMG FIle](https://custom-icon-badges.demolab.com/badge/-Download-blue?style=for-the-badge&logo=download&logoColor=white "Download zip")](https://github.com/satinath-nit/OpenExplorer/releases/download/1.6.1/OpenExplorer-arm64.dmg)
+[![Download DMG FIle](https://custom-icon-badges.demolab.com/badge/-Download-blue?style=for-the-badge&logo=download&logoColor=white "Download zip")](https://github.com/satinath-nit/OpenExplorer/releases/download/2.0.2/OpenExplorer-arm64.dmg)
 <!-- END LATEST DOWNLOAD BUTTON -->
 
 ![OpenExplorer](./OpenExplorer.jpeg)
@@ -15,12 +15,16 @@ OpenExplorer is a native, open-source macOS file manager for people who prefer t
 - List, Details, Tiles, and Content layouts
 - Independent Details and Preview panes
 - Windows-style yellow folder icons
-- Search and filter within the current folder
+- Recursive, Spotlight-backed search within the current folder, with a filesystem fallback for newly created items that are not indexed yet
 - Sortable Name, Date Modified, Date Created, Type, and Size columns; Date Modified defaults to newest-first for every folder
-- Favorites, Quick Access, cloud-storage locations, and local devices
+- Favorites, Quick Access, cloud-storage locations, and dynamically discovered mounted devices, including Eject and DMG mounting without opening Finder
 - Back and forward history for each tab
 - Create folders and blank files of any type, then open, rename, copy, cut, paste, or move items to the macOS Trash
-- Drag files and folders from List or icon views into other macOS applications
+- Copy and move jobs show progress, support cancellation between items, offer Replace/Keep Both/Skip conflict choices, and can be undone with `⌘Z`
+- Drag files and folders between OpenExplorer folders in List or icon views, or drag them into other macOS applications
+- Browse and empty the macOS Trash, and restore items sent there by OpenExplorer to their original location
+- Get Info displays calculated size, ownership and permissions; POSIX permissions and the Locked flag can be edited
+- Connect to SMB, AFP, NFS, and WebDAV server addresses from the sidebar
 - Extract ZIP archives directly inside OpenExplorer without opening Finder; extracted folders appear automatically and use a safe numbered name when needed
 - Live folder monitoring keeps the current view synchronized with downloads, Archive Utility, Terminal, and other applications without requiring a manual refresh
 - Quick Look integration remains available for native macOS previews, alongside an **Open With** menu that discovers compatible installed applications and provides **Choose Application…**
@@ -29,7 +33,8 @@ OpenExplorer is a native, open-source macOS file manager for people who prefer t
 - Folder context actions to copy a home-relative path or open the location in Terminal
 - Persistent last folder, favorites, pane choices, and view mode
 - Finder-style app lifecycle: closing the last window keeps OpenExplorer in the Dock, ready to reopen
-- Native shortcuts including `⌘N` New Tab, `⌘X` Close Window, `⌘C` Copy, `⌘V` Paste, `⇧⌘X` Cut, `⇧⌘N` New Folder, and `⌘L` Location
+- Installed version displayed in the sidebar footer and the standard About OpenExplorer panel
+- Native shortcuts including `⌘N` New Tab, `⌘W` Close Window, `⌘X` Cut, `⌘C` Copy, `⌘V` Paste, `⌘Z` Undo, `⌘I` Get Info, `⇧⌘N` New Folder, and `⌘L` Location
 - System-wide `⌘E` shortcut to bring OpenExplorer forward or restore its closed window while it is running in the Dock
 
 ## System requirements
@@ -40,6 +45,10 @@ OpenExplorer is a native, open-source macOS file manager for people who prefer t
 - Xcode or the standalone Xcode Command Line Tools
 
 OpenExplorer uses native macOS APIs including AppKit, Quick Look, and the Trash. Windows and Linux are not supported.
+
+### Trash access
+
+macOS protects the Trash from third-party applications. The first time you open Trash, OpenExplorer may ask you to add it in **System Settings > Privacy & Security > Full Disk Access**. After enabling OpenExplorer, quit and reopen the app. OpenExplorer links directly to this setting when access is denied; it cannot grant the permission itself.
 
 ## Clone the repository
 
@@ -91,7 +100,7 @@ This builds the shared core and runs its checks. After packaging, run the UI sta
 ./scripts/smoke-test-app.sh
 ```
 
-The smoke test verifies that the application opens a visible key window, adapts to light and dark appearance, exposes address and folder-location actions, preserves List columns across view changes, remains running after its last window closes, reopens from the Dock, and routes `⌘N`, `⌘C`, and `⌘V` to the explorer window.
+The smoke test verifies that the application opens a visible key window, adapts to light and dark appearance, exposes address and folder-location actions, preserves List columns across view changes, remains running after its last window closes, reopens from the Dock, and routes standard shortcuts including `⌘W` Close Window and `⌘X` Cut to the explorer window.
 
 ## Build the macOS application and DMG
 
@@ -114,10 +123,10 @@ release/OpenExplorer.app
 release/OpenExplorer-<version>-<architecture>.dmg
 ```
 
-For example, an Apple-silicon build of version 1.6.1 produces:
+For example, an Apple-silicon build of version 2.0.2 produces:
 
 ```text
-release/OpenExplorer-1.6.1-arm64.dmg
+release/OpenExplorer-2.0.2-arm64.dmg
 ```
 
 To request a specific architecture supported by the installed toolchain:

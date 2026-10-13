@@ -15,6 +15,19 @@ private struct FileItem {
     var sizeText: String { FileTextFormatter.byteCount(size, isDirectory: isDirectory) }
 }
 
+private struct ItemDetails: Sendable {
+    let size: Int64
+    let owner: String
+    let group: String
+    let permissions: Int
+    let isLocked: Bool
+}
+
+private struct TrashRecord: Codable, Sendable {
+    let trashedPath: String
+    let originalPath: String
+}
+
 private struct BrowserTab {
     var history: BrowserHistory
     var title: String {
@@ -70,6 +83,24 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
     private var textEditors: [TextEditorWindowController] = []
     private var directoryMonitor: DirectoryMonitor?
     private var pendingDirectoryReload: DispatchWorkItem?
+    private let fileOperations = FileOperationEngine()
+    private var lastTransferRecords: [FileTransferRecord] = []
+    private var operationCancellation: FileOperationCancellation?
+    private var searchTask: Task<Void, Never>?
+    private var searchResults: [FileItem]?
+    private var isShowingTrashAccessAlert = false
+
+    private var trashURL: URL {
+        fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Trash", isDirectory: true)
+    }
+    private var springLoadWorkItem: DispatchWorkItem?
+    private var springLoadURL: URL?
+    private var trashRecords: [TrashRecord] = {
+        guard let data = UserDefaults.standard.data(forKey: "trashRecordsV1") else { return [] }
+        return (try? JSONDecoder().decode([TrashRecord].self, from: data)) ?? []
+    }()
+    private let devicesStack = NSStackView()
+    private var workspaceObservers: [NSObjectProtocol] = []
 
     private let tabStack = NSStackView()
     private let breadcrumbStack = NSStackView()
@@ -98,6 +129,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
     private let previewCreated = NSTextField(labelWithString: "—")
     private let previewWhere = NSTextField(wrappingLabelWithString: "")
     private let favoritesStack = NSStackView()
+    private let versionLabel = NSTextField(labelWithString: "")
     private var previewOnlyViews: [NSView] = []
     private var detailsOnlyViews: [NSView] = []
     private var viewMode = (UserDefaults.standard.object(forKey: "viewModeV2") as? Int).flatMap(BrowserViewMode.init(rawValue:)) ?? .details
@@ -109,9 +141,18 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
     init() {
         let storedPath = UserDefaults.standard.string(forKey: "lastFolder")
         let storedURL = storedPath.map { URL(fileURLWithPath: $0) }
-        let initialURL = storedURL.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+        let homeURL = FileManager.default.homeDirectoryForCurrentUser
+        let protectedTrashURL = homeURL.appendingPathComponent(".Trash", isDirectory: true).standardizedFileURL
+        let initialURL = storedURL.flatMap { url -> URL? in
+            guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+            if url.standardizedFileURL == protectedTrashURL,
+               (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) == nil {
+                return nil
+            }
+            return url
+        }
             ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser
+            ?? homeURL
         tabs = [BrowserTab(history: BrowserHistory(initialURL: initialURL))]
 
         if let storedFavorites = UserDefaults.standard.stringArray(forKey: "favoriteFolders") {
@@ -132,6 +173,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         super.init(window: window)
         window.delegate = self
         buildInterface()
+        observeMountedVolumes()
         renderActiveTab()
     }
 
@@ -180,7 +222,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         if !addressField.isEditable || !addressField.isSelectable {
             failures.append("address field is not editable and selectable")
         }
-        let expectedContextActions = ["Edit in OpenExplorer", "Copy Path Relative to Home", "Open in Terminal"]
+        let expectedContextActions = ["Get Info", "Edit in OpenExplorer", "Copy Path Relative to Home", "Open in Terminal", "Restore from Trash"]
         for title in expectedContextActions {
             if tableView.menu?.item(withTitle: title)?.target !== self {
                 failures.append("list context menu is missing \(title)")
@@ -202,6 +244,25 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         if breadcrumbContainer.menu?.item(withTitle: "Copy Address")?.target !== self
             || breadcrumbContainer.menu?.item(withTitle: "Edit Address")?.target !== self {
             failures.append("address bar actions are incomplete")
+        }
+        if searchField.placeholderString != "Search this folder recursively" {
+            failures.append("recursive search is not exposed")
+        }
+        if !tableView.registeredDraggedTypes.contains(.fileURL) || !collectionView.registeredDraggedTypes.contains(.fileURL) || collectionView.onFileDrop == nil {
+            failures.append("internal file and folder drop targets are not registered")
+        }
+        if devicesStack.arrangedSubviews.isEmpty {
+            failures.append("mounted volumes are not listed")
+        }
+        if sidebarButtons.compactMap({ $0 as? FileDropButton }).contains(where: { $0.onFileDrop == nil }) {
+            failures.append("sidebar locations are not drop targets")
+        }
+        if tabStack.arrangedSubviews.compactMap({ $0 as? FileDropSurfaceView }).contains(where: { $0.onFileDrop == nil }) {
+            failures.append("folder tabs are not drop targets")
+        }
+        let expectedVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        if let expectedVersion, versionLabel.stringValue != "Version \(expectedVersion)" {
+            failures.append("sidebar does not show the installed version")
         }
         let sample = fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Documents/Example", isDirectory: true)
         if pathRelativeToHome(sample) != "Documents/Example" {
@@ -366,10 +427,17 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         tabIndexes.removeAll()
 
         for (index, tab) in tabs.enumerated() {
-            let container = AppearanceSurfaceView()
+            let container = FileDropSurfaceView()
             container.layer?.cornerRadius = 8
             container.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
             container.fillColor = index == activeTabIndex ? .controlBackgroundColor : .clear
+            container.destinationURL = tab.history.current
+            container.onFileDrop = { [weak self] sources, destination, info in
+                guard let self else { return false }
+                self.runTransfer(sources, to: destination, kind: self.internalDragKind(info))
+                return true
+            }
+            container.registerForDraggedTypes([.fileURL])
 
             let button = NSButton(title: tab.title, target: self, action: #selector(selectTab(_:)))
             button.image = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Folder tab")
@@ -484,7 +552,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
             self?.focusAddress(nil)
         }
 
-        searchField.placeholderString = "Search this folder"
+        searchField.placeholderString = "Search this folder recursively"
         searchField.delegate = self
         searchField.translatesAutoresizingMaskIntoConstraints = false
         searchField.widthAnchor.constraint(equalToConstant: 250).isActive = true
@@ -641,7 +709,33 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
             addSidebarLocation("OneDrive", symbol: "cloud", color: .systemBlue, url: oneDrive, to: stack)
         }
         addSidebarLocation(NSUserName(), symbol: "house", color: .systemOrange, url: fileManager.homeDirectoryForCurrentUser, to: stack)
-        addSidebarLocation("Macintosh HD", symbol: "internaldrive", color: .secondaryLabelColor, url: URL(fileURLWithPath: "/"), to: stack)
+        devicesStack.orientation = .vertical
+        devicesStack.alignment = .leading
+        devicesStack.spacing = 3
+        stack.addArrangedSubview(devicesStack)
+        devicesStack.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        rebuildMountedVolumes()
+
+        let connect = NSButton(title: "Connect to Server…", target: self, action: #selector(connectToServer(_:)))
+        connect.image = NSImage(systemSymbolName: "network", accessibilityDescription: "Connect to Server")
+        connect.imagePosition = .imageLeading
+        connect.alignment = .left
+        connect.isBordered = false
+        connect.contentTintColor = .systemBlue
+        stack.addArrangedSubview(connect)
+        connect.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        let trash = NSButton(title: "Trash", target: self, action: #selector(openTrash(_:)))
+        trash.image = NSImage(systemSymbolName: "trash", accessibilityDescription: "Trash")
+        trash.imagePosition = .imageLeading
+        trash.alignment = .left
+        trash.isBordered = false
+        let trashMenu = NSMenu()
+        let emptyTrash = trashMenu.addItem(withTitle: "Empty Trash…", action: #selector(emptyTrash(_:)), keyEquivalent: "")
+        emptyTrash.target = self
+        trash.menu = trashMenu
+        stack.addArrangedSubview(trash)
+        trash.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
         let brand = NSButton(title: "OpenExplorer", target: self, action: #selector(openProjectWebsite(_:)))
         brand.attributedTitle = NSAttributedString(
@@ -655,11 +749,15 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         brand.isBordered = false
         brand.alignment = .left
         brand.toolTip = "https://github.com/satinath-nit/OpenExplorer"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        versionLabel.stringValue = version.map { "Version \($0)" } ?? "Development build"
+        versionLabel.font = .systemFont(ofSize: 9, weight: .medium)
+        versionLabel.textColor = .secondaryLabelColor
         let credit = NSTextField(wrappingLabelWithString: "Designed and developed by\nSatinath Mondal")
         credit.font = .systemFont(ofSize: 9)
         credit.textColor = .tertiaryLabelColor
         credit.maximumNumberOfLines = 2
-        let creditStack = NSStackView(views: [brand, credit])
+        let creditStack = NSStackView(views: [brand, versionLabel, credit])
         creditStack.orientation = .vertical
         creditStack.alignment = .leading
         creditStack.spacing = 3
@@ -726,7 +824,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
     }
 
     private func addSidebarLocation(_ title: String, symbol: String, color: NSColor, url: URL, to stack: NSStackView) {
-        let button = NSButton(title: title, target: self, action: #selector(sidebarLocation(_:)))
+        let button = FileDropButton(title: title, target: self, action: #selector(sidebarLocation(_:)))
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
         button.contentTintColor = color
         button.imagePosition = .imageLeading
@@ -735,6 +833,14 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         button.isBordered = false
         button.font = .systemFont(ofSize: 13)
         button.toolTip = url.path
+        button.destinationURL = url
+        button.onFileDrop = { [weak self] sources, destination, info in
+            guard let self else { return false }
+            guard !sources.contains(where: { destination.standardizedFileURL == $0.standardizedFileURL || destination.path.hasPrefix($0.standardizedFileURL.path + "/") }) else { return false }
+            self.runTransfer(sources, to: destination, kind: self.internalDragKind(info))
+            return true
+        }
+        button.registerForDraggedTypes([.fileURL])
         sidebarURLs[ObjectIdentifier(button)] = url
         sidebarButtons.append(button)
         stack.addArrangedSubview(button)
@@ -746,6 +852,123 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         let cloudRoot = fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Library/CloudStorage", isDirectory: true)
         return (try? fileManager.contentsOfDirectory(at: cloudRoot, includingPropertiesForKeys: nil))?
             .first { $0.lastPathComponent.lowercased().hasPrefix("onedrive") }
+    }
+
+    private func observeMountedVolumes() {
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
+            workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.rebuildMountedVolumes() }
+            })
+        }
+    }
+
+    private func rebuildMountedVolumes() {
+        devicesStack.arrangedSubviews.forEach {
+            if let button = $0 as? NSButton {
+                sidebarURLs.removeValue(forKey: ObjectIdentifier(button))
+                sidebarButtons.removeAll { $0 === button }
+            }
+            devicesStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        let keys: [URLResourceKey] = [.volumeNameKey, .volumeIsEjectableKey, .volumeIsRemovableKey]
+        let volumes = fileManager.mountedVolumeURLs(includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) ?? [URL(fileURLWithPath: "/")]
+        for volume in volumes.sorted(by: { $0.path.localizedStandardCompare($1.path) == .orderedAscending }) {
+            let values = try? volume.resourceValues(forKeys: Set(keys))
+            let title = values?.volumeName ?? (volume.path == "/" ? "Macintosh HD" : volume.lastPathComponent)
+            addSidebarLocation(title, symbol: volume.path == "/" ? "internaldrive" : "externaldrive", color: .secondaryLabelColor, url: volume, to: devicesStack)
+            guard volume.path != "/", let button = devicesStack.arrangedSubviews.last as? NSButton else { continue }
+            let menu = NSMenu()
+            let eject = menu.addItem(withTitle: "Eject \(title)", action: #selector(ejectVolume(_:)), keyEquivalent: "")
+            eject.representedObject = volume
+            eject.target = self
+            button.menu = menu
+        }
+    }
+
+    @objc private func ejectVolume(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        Task { [weak self] in
+            do { try NSWorkspace.shared.unmountAndEjectDevice(at: url) }
+            catch { self?.showError("Could not eject \(url.lastPathComponent)", detail: error.localizedDescription) }
+        }
+    }
+
+    @objc private func connectToServer(_ sender: Any?) {
+        guard let value = prompt(title: "Connect to Server", message: "Enter an address such as smb://server/share", defaultValue: "smb://", confirm: "Connect"),
+              let url = URL(string: value), let scheme = url.scheme, ["smb", "afp", "nfs", "webdav", "webdavs"].contains(scheme.lowercased()) else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func openTrash(_ sender: Any?) {
+        do {
+            _ = try fileManager.contentsOfDirectory(at: trashURL, includingPropertiesForKeys: nil)
+            navigate(to: trashURL)
+        } catch where FolderAccessDiagnostics.isPermissionDenied(error) {
+            showTrashAccessAlert()
+        } catch {
+            showError("Could not open Trash", detail: error.localizedDescription)
+        }
+    }
+
+    @objc private func emptyTrash(_ sender: Any?) {
+        let trash = trashURL
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "Empty Trash?"
+        alert.informativeText = "This permanently deletes every item in your Trash and cannot be undone."
+        alert.addButton(withTitle: "Empty Trash")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            for url in try fileManager.contentsOfDirectory(at: trash, includingPropertiesForKeys: nil) {
+                try fileManager.removeItem(at: url)
+            }
+            reloadContents()
+        } catch where FolderAccessDiagnostics.isPermissionDenied(error) {
+            showTrashAccessAlert()
+        } catch {
+            showError("Could not empty Trash", detail: error.localizedDescription)
+        }
+    }
+
+    @objc private func restoreFromTrash(_ sender: Any?) {
+        let selection = selectedItems
+        guard !selection.isEmpty else { return }
+        var failures: [String] = []
+        var fallbackDirectory: URL?
+        for item in selection {
+            let requested: URL
+            if let record = trashRecords.last(where: { $0.trashedPath == item.url.path }) {
+                requested = URL(fileURLWithPath: record.originalPath)
+            } else {
+                if fallbackDirectory == nil {
+                    let panel = NSOpenPanel()
+                    panel.title = "Choose a Restore Location"
+                    panel.message = "The original location is unavailable because this item was not moved to Trash by OpenExplorer."
+                    panel.prompt = "Restore Here"
+                    panel.canChooseFiles = false
+                    panel.canChooseDirectories = true
+                    panel.allowsMultipleSelection = false
+                    panel.directoryURL = fileManager.homeDirectoryForCurrentUser
+                    guard panel.runModal() == .OK, let chosen = panel.url else { return }
+                    fallbackDirectory = chosen
+                }
+                requested = fallbackDirectory!.appendingPathComponent(item.name)
+            }
+            let destination = fileOperations.availableDestination(for: requested)
+            do {
+                try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try fileManager.moveItem(at: item.url, to: destination)
+                trashRecords.removeAll { $0.trashedPath == item.url.path }
+            } catch { failures.append("\(item.name): \(error.localizedDescription)") }
+        }
+        if let data = try? JSONEncoder().encode(trashRecords) { UserDefaults.standard.set(data, forKey: "trashRecordsV1") }
+        reloadContents()
+        if !failures.isEmpty { showError("Some items could not be restored", detail: failures.joined(separator: "\n")) }
     }
 
     private func buildFileArea() -> NSView {
@@ -813,7 +1036,8 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         tableView.target = self
         tableView.doubleAction = #selector(openSelection(_:))
         tableView.setDraggingSourceOperationMask(.copy, forLocal: false)
-        tableView.setDraggingSourceOperationMask(.copy, forLocal: true)
+        tableView.setDraggingSourceOperationMask([.copy, .move], forLocal: true)
+        tableView.registerForDraggedTypes([.fileURL])
 
         let name = tableColumn("name", title: "Name", width: 390, min: 200)
         name.sortDescriptorPrototype = NSSortDescriptor(key: "name", ascending: true, selector: #selector(NSString.localizedStandardCompare(_:)))
@@ -846,7 +1070,21 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         collectionView.allowsMultipleSelection = true
         collectionView.backgroundColors = [.controlBackgroundColor]
         collectionView.setDraggingSourceOperationMask(.copy, forLocal: false)
-        collectionView.setDraggingSourceOperationMask(.copy, forLocal: true)
+        collectionView.setDraggingSourceOperationMask([.copy, .move], forLocal: true)
+        collectionView.registerForDraggedTypes([.fileURL])
+        collectionView.onFileDrop = { [weak self, weak collectionView] urls, indexPath, info in
+            guard let self else { return false }
+            let destination: URL
+            if let indexPath, self.visibleItems.indices.contains(indexPath.item), self.visibleItems[indexPath.item].isDirectory {
+                destination = self.visibleItems[indexPath.item].url
+            } else {
+                destination = self.currentURL
+            }
+            guard !urls.contains(where: { destination.standardizedFileURL == $0.standardizedFileURL || destination.path.hasPrefix($0.standardizedFileURL.path + "/") }) else { return false }
+            self.runTransfer(urls, to: destination, kind: self.internalDragKind(info))
+            collectionView?.needsDisplay = true
+            return true
+        }
         let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(collectionDoubleClicked(_:)))
         doubleClick.numberOfClicksRequired = 2
         collectionView.addGestureRecognizer(doubleClick)
@@ -964,6 +1202,9 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
             showError("Folder not found", detail: url.path)
             return
         }
+        searchTask?.cancel()
+        searchResults = nil
+        searchField.stringValue = ""
         if recordHistory { tabs[activeTabIndex].history.visit(url) }
         renderActiveTab()
     }
@@ -977,17 +1218,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
                 includingPropertiesForKeys: Array(keys),
                 options: showHiddenFiles ? [] : [.skipsHiddenFiles]
             )
-            items = urls.compactMap { url in
-                guard let values = try? url.resourceValues(forKeys: keys) else { return nil }
-                return FileItem(
-                    url: url,
-                    name: values.name ?? url.lastPathComponent,
-                    isDirectory: values.isDirectory ?? false,
-                    size: Int64(values.fileSize ?? 0),
-                    modified: values.contentModificationDate,
-                    created: values.creationDate
-                )
-            }
+            items = urls.compactMap(makeFileItem)
             applyFilterAndSort()
             if preservingSelection, !selectedPaths.isEmpty {
                 let indexes = IndexSet(visibleItems.indices.filter { selectedPaths.contains(visibleItems[$0].url.standardizedFileURL.path) })
@@ -1004,7 +1235,12 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
             visibleItems = []
             tableView.reloadData()
             collectionView.reloadData()
-            showError("Could not open folder", detail: error.localizedDescription)
+            if currentURL.standardizedFileURL == trashURL.standardizedFileURL,
+               FolderAccessDiagnostics.isPermissionDenied(error) {
+                showTrashAccessAlert()
+            } else {
+                showError("Could not open folder", detail: error.localizedDescription)
+            }
         }
     }
 
@@ -1033,7 +1269,7 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
 
     private func applyFilterAndSort() {
         let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        visibleItems = query.isEmpty ? items : items.filter { $0.name.localizedCaseInsensitiveContains(query) }
+        visibleItems = query.isEmpty ? items : (searchResults ?? items.filter { $0.name.localizedCaseInsensitiveContains(query) })
         let descriptor = tableView.sortDescriptors.first
         let key = FileSortKey(rawValue: descriptor?.key ?? "name") ?? .name
         let ascending = descriptor?.ascending ?? true
@@ -1058,6 +1294,48 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         collectionView.deselectItems(at: collectionView.selectionIndexPaths)
         updateStatus()
         updatePreview()
+    }
+
+    private func makeFileItem(_ url: URL) -> FileItem? {
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey, .nameKey]
+        guard let values = try? url.resourceValues(forKeys: keys) else { return nil }
+        return FileItem(
+            url: url,
+            name: values.name ?? url.lastPathComponent,
+            isDirectory: values.isDirectory ?? false,
+            size: Int64(values.fileSize ?? 0),
+            modified: values.contentModificationDate,
+            created: values.creationDate
+        )
+    }
+
+    private func performRecursiveSearch() {
+        searchTask?.cancel()
+        let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            searchResults = nil
+            applyFilterAndSort()
+            return
+        }
+        let root = currentURL
+        statusLabel.stringValue = "Searching \(root.lastPathComponent.isEmpty ? "Macintosh HD" : root.lastPathComponent)…"
+        searchTask = Task { [weak self] in
+            do {
+                let urls = try await Task.detached(priority: .userInitiated) {
+                    try SpotlightSearch.find(named: query, under: root)
+                }.value
+                guard !Task.isCancelled, let self,
+                      self.searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) == query,
+                      self.currentURL.standardizedFileURL == root.standardizedFileURL else { return }
+                self.searchResults = urls.compactMap(self.makeFileItem)
+                self.applyFilterAndSort()
+            } catch {
+                guard !Task.isCancelled, let self else { return }
+                self.searchResults = []
+                self.applyFilterAndSort()
+                self.statusLabel.stringValue = "Search unavailable: \(error.localizedDescription)"
+            }
+        }
     }
 
     private func updateNavigationButtons() {
@@ -1131,6 +1409,29 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         alert.messageText = message
         alert.informativeText = detail
         if let window { alert.beginSheetModal(for: window) }
+    }
+
+    private func showTrashAccessAlert() {
+        guard !isShowingTrashAccessAlert else { return }
+        isShowingTrashAccessAlert = true
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "OpenExplorer Needs Full Disk Access"
+        alert.informativeText = "macOS protects the Trash from third-party apps. Add OpenExplorer in System Settings > Privacy & Security > Full Disk Access, then quit and reopen OpenExplorer."
+        alert.addButton(withTitle: "Open Privacy Settings")
+        alert.addButton(withTitle: "Cancel")
+
+        let handleResponse: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            self?.isShowingTrashAccessAlert = false
+            guard response == .alertFirstButtonReturn else { return }
+            NSWorkspace.shared.open(FolderAccessDiagnostics.fullDiskAccessSettingsURL)
+        }
+        if let window {
+            alert.beginSheetModal(for: window, completionHandler: handleResponse)
+        } else {
+            handleResponse(alert.runModal())
+        }
     }
 
     private func prompt(title: String, message: String, defaultValue: String, confirm: String) -> String? {
@@ -1265,11 +1566,62 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         return visibleItems[row].url as NSURL
     }
 
+    func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int, proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
+        let sources = fileURLs(from: info.draggingPasteboard)
+        guard !sources.isEmpty else { return [] }
+        let destination = dropDestination(row: row, operation: dropOperation)
+        guard !sources.contains(where: { destination.standardizedFileURL == $0.standardizedFileURL || destination.path.hasPrefix($0.standardizedFileURL.path + "/") }) else { return [] }
+        scheduleSpringLoadIfNeeded(destination, isFolderTarget: dropOperation == .on)
+        return internalDragKind(info) == .move ? .move : .copy
+    }
+
+    func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
+        springLoadWorkItem?.cancel()
+        let sources = fileURLs(from: info.draggingPasteboard)
+        guard !sources.isEmpty else { return false }
+        runTransfer(sources, to: dropDestination(row: row, operation: dropOperation), kind: internalDragKind(info))
+        return true
+    }
+
     func collectionView(_ collectionView: NSCollectionView, pasteboardWriterForItemAt indexPath: IndexPath) -> NSPasteboardWriting? {
         guard visibleItems.indices.contains(indexPath.item) else { return nil }
         return visibleItems[indexPath.item].url as NSURL
     }
-    func controlTextDidChange(_ obj: Notification) { if obj.object as? NSSearchField === searchField { applyFilterAndSort() } }
+
+    private func fileURLs(from pasteboard: NSPasteboard) -> [URL] {
+        pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+    }
+
+    private func internalDragKind(_ info: NSDraggingInfo) -> FileTransferKind {
+        let isOpenExplorerSource = info.draggingSource is ExplorerTableView || info.draggingSource is ExplorerCollectionView
+        return isOpenExplorerSource && !NSEvent.modifierFlags.contains(.option) ? .move : .copy
+    }
+
+    private func dropDestination(row: Int, operation: NSTableView.DropOperation) -> URL {
+        if operation == .on, visibleItems.indices.contains(row), visibleItems[row].isDirectory { return visibleItems[row].url }
+        return currentURL
+    }
+
+    private func scheduleSpringLoadIfNeeded(_ destination: URL, isFolderTarget: Bool) {
+        guard isFolderTarget, destination.standardizedFileURL != currentURL.standardizedFileURL else {
+            springLoadWorkItem?.cancel()
+            springLoadURL = nil
+            return
+        }
+        guard springLoadURL?.standardizedFileURL != destination.standardizedFileURL else { return }
+        springLoadWorkItem?.cancel()
+        springLoadURL = destination
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.springLoadURL?.standardizedFileURL == destination.standardizedFileURL else { return }
+            self.navigate(to: destination)
+            self.springLoadURL = nil
+        }
+        springLoadWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9, execute: work)
+    }
+    func controlTextDidChange(_ obj: Notification) {
+        if obj.object as? NSSearchField === searchField { performRecursiveSearch() }
+    }
     func controlTextDidEndEditing(_ obj: Notification) {
         if obj.object as? NSTextField === addressField {
             breadcrumbStack.isHidden = false
@@ -1469,7 +1821,34 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         guard let item = selectedItems.first else { return }
         if item.isDirectory { navigate(to: item.url) }
         else if item.url.pathExtension.lowercased() == "zip" { extractZip(item.url) }
+        else if item.url.pathExtension.lowercased() == "dmg" { mountDiskImage(item.url) }
         else { NSWorkspace.shared.open(item.url) }
+    }
+
+    private func mountDiskImage(_ imageURL: URL) {
+        statusLabel.stringValue = "Mounting \(imageURL.lastPathComponent)…"
+        Task { [weak self] in
+            do {
+                let output = try await Task.detached(priority: .userInitiated) {
+                    let process = Process()
+                    let pipe = Pipe()
+                    process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+                    process.arguments = ["attach", "-nobrowse", imageURL.path]
+                    process.standardOutput = pipe
+                    process.standardError = pipe
+                    try process.run()
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    process.waitUntilExit()
+                    guard process.terminationStatus == 0 else {
+                        throw NSError(domain: "OpenExplorer.DiskImage", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: String(data: data, encoding: .utf8) ?? "The disk image could not be mounted."])
+                    }
+                    return String(data: data, encoding: .utf8) ?? "Mounted"
+                }.value
+                guard let self else { return }
+                self.rebuildMountedVolumes()
+                self.statusLabel.stringValue = output.split(separator: "\n").last.map(String.init) ?? "Disk image mounted"
+            } catch { self?.showError("Could not mount \(imageURL.lastPathComponent)", detail: error.localizedDescription) }
+        }
     }
 
     private func extractZip(_ archiveURL: URL) {
@@ -1560,6 +1939,66 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         }
     }
 
+    @objc func showGetInfo(_ sender: Any?) {
+        guard selectedItems.count == 1, let item = selectedItems.first else { return }
+        statusLabel.stringValue = "Calculating information for \(item.name)…"
+        Task { [weak self] in
+            do {
+                let details = try await Task.detached(priority: .userInitiated) {
+                    let manager = FileManager.default
+                    let attributes = try manager.attributesOfItem(atPath: item.url.path)
+                    var bytes = (attributes[.size] as? NSNumber)?.int64Value ?? item.size
+                    if item.isDirectory, let enumerator = manager.enumerator(at: item.url, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]) {
+                        bytes = 0
+                        while let child = enumerator.nextObject() as? URL {
+                            bytes += Int64((try? child.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+                        }
+                    }
+                    return ItemDetails(
+                        size: bytes,
+                        owner: attributes[.ownerAccountName] as? String ?? "—",
+                        group: attributes[.groupOwnerAccountName] as? String ?? "—",
+                        permissions: (attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0,
+                        isLocked: (attributes[.immutable] as? NSNumber)?.boolValue ?? false
+                    )
+                }.value
+                self?.presentGetInfo(for: item, details: details)
+            } catch { self?.showError("Could not read item information", detail: error.localizedDescription) }
+        }
+    }
+
+    private func presentGetInfo(for item: FileItem, details: ItemDetails) {
+        let alert = NSAlert()
+        alert.messageText = item.name
+        alert.informativeText = item.url.path
+        alert.addButton(withTitle: "Apply")
+        alert.addButton(withTitle: "Cancel")
+
+        let size = NSTextField(labelWithString: "Size: \(FileTextFormatter.byteCount(details.size, isDirectory: false))")
+        let owner = NSTextField(labelWithString: "Owner: \(details.owner)    Group: \(details.group)")
+        let permissions = NSTextField(string: String(format: "%03o", details.permissions))
+        permissions.placeholderString = "Permissions, for example 644"
+        let locked = NSButton(checkboxWithTitle: "Locked", target: nil, action: nil)
+        locked.state = details.isLocked ? .on : .off
+        let stack = NSStackView(views: [size, owner, NSTextField(labelWithString: "POSIX permissions:"), permissions, locked])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.frame = NSRect(x: 0, y: 0, width: 390, height: 120)
+        permissions.widthAnchor.constraint(equalToConstant: 100).isActive = true
+        alert.accessoryView = stack
+        statusLabel.stringValue = "\(visibleItems.count) items"
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard let mode = Int(permissions.stringValue, radix: 8), (0...0o7777).contains(mode) else {
+            showError("Invalid permissions", detail: "Enter an octal value such as 644 or 755.")
+            return
+        }
+        do {
+            try fileManager.setAttributes([.posixPermissions: mode, .immutable: locked.state == .on], ofItemAtPath: item.url.path)
+            reloadContents(preservingSelection: true)
+        } catch { showError("Could not update item information", detail: error.localizedDescription) }
+    }
+
     @objc func quickLook(_ sender: Any?) {
         let selection = selectedItems
         guard !selection.isEmpty else { return }
@@ -1581,6 +2020,9 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         menu.item(withTitle: "Edit in OpenExplorer")?.isEnabled = canEdit
         menu.item(withTitle: "Open With")?.isEnabled = !selectedItems.isEmpty
         menu.item(withTitle: "Quick Look")?.isEnabled = !selectedItems.isEmpty
+        let isTrash = currentURL.standardizedFileURL == fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".Trash", isDirectory: true).standardizedFileURL
+        menu.item(withTitle: "Restore from Trash")?.isHidden = !isTrash
+        menu.item(withTitle: "Move to Trash")?.isHidden = isTrash
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -1643,10 +2085,21 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         var failures: [String] = []
+        var records: [FileTransferRecord] = []
         for item in selection {
-            do { try fileManager.trashItem(at: item.url, resultingItemURL: nil) }
+            do {
+                var trashedURL: NSURL?
+                try fileManager.trashItem(at: item.url, resultingItemURL: &trashedURL)
+                if let destination = trashedURL as URL? {
+                    records.append(FileTransferRecord(source: item.url, destination: destination, kind: .move))
+                    trashRecords.append(TrashRecord(trashedPath: destination.path, originalPath: item.url.path))
+                }
+            }
             catch { failures.append("\(item.name): \(error.localizedDescription)") }
         }
+        if let data = try? JSONEncoder().encode(trashRecords) { UserDefaults.standard.set(data, forKey: "trashRecordsV1") }
+        fileOperations.discardUndo(lastTransferRecords)
+        lastTransferRecords = records
         reloadContents()
         if !failures.isEmpty { showError("Some items could not be moved", detail: failures.joined(separator: "\n")) }
     }
@@ -1698,20 +2151,97 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
     @objc func paste(_ sender: Any?) {
         let sources = transferSourcesFromPasteboard()
         guard !sources.isEmpty else { return }
-        var failures: [String] = []
-        for source in sources {
-            let destination = destinationURL(for: source)
-            do {
-                if cutURLs.contains(source) {
-                    try fileManager.moveItem(at: source, to: destination)
-                    cutURLs.remove(source)
-                } else {
-                    try fileManager.copyItem(at: source, to: destination)
-                }
-            } catch { failures.append("\(source.lastPathComponent): \(error.localizedDescription)") }
+        let kind: FileTransferKind = sources.allSatisfy { cutURLs.contains($0) } ? .move : .copy
+        runTransfer(sources, to: currentURL, kind: kind)
+    }
+
+    private func runTransfer(_ sources: [URL], to directory: URL, kind: FileTransferKind) {
+        guard !sources.isEmpty, operationCancellation == nil else { return }
+        guard let resolution = conflictResolution(for: sources, in: directory, kind: kind) else { return }
+        let cancellation = FileOperationCancellation()
+        operationCancellation = cancellation
+
+        let alert = NSAlert()
+        alert.messageText = kind == .move ? "Moving \(sources.count) item\(sources.count == 1 ? "" : "s")…" : "Copying \(sources.count) item\(sources.count == 1 ? "" : "s")…"
+        alert.informativeText = "You can cancel after the current item finishes."
+        alert.addButton(withTitle: "Cancel")
+        let progress = NSProgressIndicator()
+        progress.style = .bar
+        progress.isIndeterminate = false
+        progress.minValue = 0
+        progress.maxValue = Double(sources.count)
+        progress.doubleValue = 0
+        progress.frame = NSRect(x: 0, y: 0, width: 360, height: 18)
+        alert.accessoryView = progress
+        let reporter = OperationProgressReporter(progress)
+        if let window {
+            alert.beginSheetModal(for: window) { _ in cancellation.cancel() }
         }
-        reloadContents()
-        if !failures.isEmpty { showError("Some items could not be pasted", detail: failures.joined(separator: "\n")) }
+
+        let engine = fileOperations
+        Task { [weak self, weak alert] in
+            let result = await Task.detached(priority: .userInitiated) {
+                engine.transfer(
+                    sources,
+                    to: directory,
+                    kind: kind,
+                    cancelled: { cancellation.isCancelled },
+                    progress: { completed, total in
+                        Task { @MainActor in reporter.update(completed: completed, total: total) }
+                    }
+                ) { _, _ in resolution }
+            }.value
+            guard let self else { return }
+            if let alert, alert.window.sheetParent != nil { alert.window.sheetParent?.endSheet(alert.window) }
+            self.operationCancellation = nil
+            self.fileOperations.discardUndo(self.lastTransferRecords)
+            self.lastTransferRecords = result.completed
+            if kind == .move { result.completed.forEach { self.cutURLs.remove($0.source) } }
+            self.reloadContents()
+            if !result.failures.isEmpty {
+                self.showError("Some items could not be transferred", detail: result.failures.map { "\($0.0.lastPathComponent): \($0.1)" }.joined(separator: "\n"))
+            } else if result.wasCancelled {
+                self.statusLabel.stringValue = "Operation cancelled after \(result.completed.count) item(s)"
+            } else {
+                self.statusLabel.stringValue = "Completed \(result.completed.count) item(s) — use ⌘Z to undo"
+            }
+        }
+    }
+
+    private func conflictResolution(for sources: [URL], in directory: URL, kind: FileTransferKind) -> FileConflictResolution? {
+        let hasConflict = sources.contains { source in
+            let destination = directory.appendingPathComponent(source.lastPathComponent)
+            if kind == .copy, destination.standardizedFileURL == source.standardizedFileURL { return false }
+            return fileManager.fileExists(atPath: destination.path)
+        }
+        guard hasConflict else { return .keepBoth }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "An item with the same name already exists"
+        alert.informativeText = "Choose how OpenExplorer should handle name conflicts in this operation."
+        alert.addButton(withTitle: "Keep Both")
+        alert.addButton(withTitle: "Replace")
+        alert.addButton(withTitle: "Skip")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .keepBoth
+        case .alertSecondButtonReturn: return .replace
+        case .alertThirdButtonReturn: return .skip
+        default: return nil
+        }
+    }
+
+    @objc func undoLastOperation(_ sender: Any?) {
+        guard !lastTransferRecords.isEmpty else { NSSound.beep(); return }
+        let records = lastTransferRecords
+        let failures = fileOperations.undo(records)
+        if failures.isEmpty {
+            lastTransferRecords = []
+            reloadContents()
+            statusLabel.stringValue = "Undid the last file operation"
+        } else {
+            showError("Could not completely undo the operation", detail: failures.map { "\($0.0.lastPathComponent): \($0.1)" }.joined(separator: "\n"))
+        }
     }
 
     @objc func selectAllItems(_ sender: Any?) {
@@ -1783,6 +2313,9 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         openWithItem.submenu = makeOpenWithMenu()
         let quickLookItem = menu.addItem(withTitle: "Quick Look", action: #selector(quickLook(_:)), keyEquivalent: "")
         quickLookItem.target = self
+        let getInfo = menu.addItem(withTitle: "Get Info", action: #selector(showGetInfo(_:)), keyEquivalent: "")
+        getInfo.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: "Get Info")
+        getInfo.target = self
         let edit = menu.addItem(withTitle: "Edit in OpenExplorer", action: #selector(editInOpenExplorer(_:)), keyEquivalent: "")
         edit.image = NSImage(systemSymbolName: "pencil.and.outline", accessibilityDescription: "Edit in OpenExplorer")
         edit.target = self
@@ -1806,6 +2339,8 @@ final class BrowserWindowController: NSWindowController, NSTableViewDataSource, 
         rename.target = self
         let trash = menu.addItem(withTitle: "Move to Trash", action: #selector(trashSelection(_:)), keyEquivalent: "")
         trash.target = self
+        let restore = menu.addItem(withTitle: "Restore from Trash", action: #selector(restoreFromTrash(_:)), keyEquivalent: "")
+        restore.target = self
         if includesRevealInFinder {
             let reveal = menu.addItem(withTitle: "Reveal in Finder", action: #selector(revealSelection(_:)), keyEquivalent: "")
             reveal.target = self
@@ -2031,6 +2566,8 @@ private final class ExplorerTableView: NSTableView {
 }
 
 private final class ExplorerCollectionView: NSCollectionView {
+    var onFileDrop: (([URL], IndexPath?, NSDraggingInfo) -> Bool)?
+
     override func menu(for event: NSEvent) -> NSMenu? {
         let point = convert(event.locationInWindow, from: nil)
         if let clicked = indexPathForItem(at: point) {
@@ -2042,10 +2579,48 @@ private final class ExplorerCollectionView: NSCollectionView {
         }
         return super.menu(for: event)
     }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        draggingUpdated(sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        guard !urls.isEmpty else { return [] }
+        let local = sender.draggingSource is ExplorerTableView || sender.draggingSource is ExplorerCollectionView
+        return local && !NSEvent.modifierFlags.contains(.option) ? .move : .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        let point = convert(sender.draggingLocation, from: nil)
+        return onFileDrop?(urls, indexPathForItem(at: point), sender) ?? false
+    }
 }
 
 private final class PathButton: NSButton {
     var destinationURL: URL?
+}
+
+private final class FileDropButton: NSButton {
+    var destinationURL: URL?
+    var onFileDrop: (([URL], URL, NSDraggingInfo) -> Bool)?
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { draggingUpdated(sender) }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard destinationURL != nil else { return [] }
+        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        guard !urls.isEmpty else { return [] }
+        let local = sender.draggingSource is ExplorerTableView || sender.draggingSource is ExplorerCollectionView
+        return local && !NSEvent.modifierFlags.contains(.option) ? .move : .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let destinationURL else { return false }
+        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        return onFileDrop?(urls, destinationURL, sender) ?? false
+    }
 }
 
 private class AppearanceSurfaceView: NSView {
@@ -2069,12 +2644,45 @@ private class AppearanceSurfaceView: NSView {
     }
 }
 
+private final class FileDropSurfaceView: AppearanceSurfaceView {
+    var destinationURL: URL?
+    var onFileDrop: (([URL], URL, NSDraggingInfo) -> Bool)?
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { draggingUpdated(sender) }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard destinationURL != nil else { return [] }
+        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        guard !urls.isEmpty else { return [] }
+        let local = sender.draggingSource is ExplorerTableView || sender.draggingSource is ExplorerCollectionView
+        return local && !NSEvent.modifierFlags.contains(.option) ? .move : .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let destinationURL else { return false }
+        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        return onFileDrop?(urls, destinationURL, sender) ?? false
+    }
+}
+
 private final class BreadcrumbView: AppearanceSurfaceView {
     var onBackgroundClick: (() -> Void)?
 
     override func mouseDown(with event: NSEvent) {
         super.mouseDown(with: event)
         onBackgroundClick?()
+    }
+}
+
+@MainActor
+private final class OperationProgressReporter {
+    private weak var indicator: NSProgressIndicator?
+
+    init(_ indicator: NSProgressIndicator) { self.indicator = indicator }
+
+    func update(completed: Int, total: Int) {
+        indicator?.maxValue = Double(max(1, total))
+        indicator?.doubleValue = Double(completed)
     }
 }
 

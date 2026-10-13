@@ -23,6 +23,28 @@ require(FileTextFormatter.byteCount(1_024, isDirectory: true) == "—", "Folders
 require(FileTextFormatter.kind(for: URL(fileURLWithPath: "/tmp/report.pdf"), isDirectory: false) == "PDF file", "Extensions should format as file kinds")
 require(FileTextFormatter.kind(for: URL(fileURLWithPath: "/tmp/docs"), isDirectory: true) == "Folder", "Directories should format as folders")
 
+let cocoaPermissionError = NSError(
+    domain: NSCocoaErrorDomain,
+    code: CocoaError.fileReadNoPermission.rawValue
+)
+require(
+    FolderAccessDiagnostics.isPermissionDenied(cocoaPermissionError),
+    "Cocoa file-read permission failures should be recognized as protected-folder access denials"
+)
+let wrappedPermissionError = NSError(
+    domain: NSCocoaErrorDomain,
+    code: CocoaError.fileReadUnknown.rawValue,
+    userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES))]
+)
+require(
+    FolderAccessDiagnostics.isPermissionDenied(wrappedPermissionError),
+    "Wrapped POSIX access failures should be recognized as protected-folder access denials"
+)
+require(
+    FolderAccessDiagnostics.fullDiskAccessSettingsURL.absoluteString.contains("Privacy_AllFiles"),
+    "The recovery action should open macOS Full Disk Access settings"
+)
+
 let olderFolder = FileSortEntry(
     identifier: "folder",
     name: "Archive",
@@ -122,6 +144,47 @@ require(
 require(
     ZipExtractor.uniqueDestination(for: zipArchive).lastPathComponent == "sample 2",
     "Repeated ZIP extraction should choose a non-destructive folder name"
+)
+
+let operationsRoot = creationTestDirectory.appendingPathComponent("operations", isDirectory: true)
+let sourceRoot = operationsRoot.appendingPathComponent("source", isDirectory: true)
+let destinationRoot = operationsRoot.appendingPathComponent("destination", isDirectory: true)
+try FileManager.default.createDirectory(at: sourceRoot, withIntermediateDirectories: true)
+try FileManager.default.createDirectory(at: destinationRoot, withIntermediateDirectories: true)
+let sourceFile = sourceRoot.appendingPathComponent("notes.txt")
+try Data("original".utf8).write(to: sourceFile)
+try Data("existing".utf8).write(to: destinationRoot.appendingPathComponent("notes.txt"))
+let operationEngine = FileOperationEngine()
+let copyResult = operationEngine.transfer([sourceFile], to: destinationRoot, kind: .copy) { _, _ in .keepBoth }
+require(copyResult.failures.isEmpty, "Copy should complete without failures")
+require(copyResult.completed.first?.destination.lastPathComponent == "notes copy.txt", "Keep Both should create a predictable unique name")
+require(FileManager.default.fileExists(atPath: destinationRoot.appendingPathComponent("notes copy.txt").path), "Copied item should exist")
+require(operationEngine.undo(copyResult.completed).isEmpty, "Undoing a copy should succeed")
+require(!FileManager.default.fileExists(atPath: destinationRoot.appendingPathComponent("notes copy.txt").path), "Undo should remove the copied item")
+
+let sameFolderCopy = operationEngine.transfer([sourceFile], to: sourceRoot, kind: .copy) { _, _ in .keepBoth }
+require(sameFolderCopy.failures.isEmpty, "Copying an item in its own folder should not fail")
+require(sameFolderCopy.completed.first?.destination.lastPathComponent == "notes copy.txt", "A same-folder copy should use a Keep Both name")
+require(FileManager.default.fileExists(atPath: sourceRoot.appendingPathComponent("notes copy.txt").path), "A same-folder Keep Both copy should create a second item")
+let repeatedSameFolderCopy = operationEngine.transfer([sourceFile], to: sourceRoot, kind: .copy) { _, _ in .keepBoth }
+require(repeatedSameFolderCopy.completed.first?.destination.lastPathComponent == "notes copy 2.txt", "Repeated same-folder copies should use the next available name")
+require(operationEngine.undo(repeatedSameFolderCopy.completed).isEmpty, "A repeated same-folder copy should be undoable")
+require(operationEngine.undo(sameFolderCopy.completed).isEmpty, "A same-folder copy should be undoable")
+
+let moveResult = operationEngine.transfer([sourceFile], to: destinationRoot, kind: .move) { _, _ in .replace }
+require(moveResult.failures.isEmpty, "Move with Replace should complete")
+require(!FileManager.default.fileExists(atPath: sourceFile.path), "Move should remove the source")
+require(operationEngine.undo(moveResult.completed).isEmpty, "Undoing a move should succeed")
+require(FileManager.default.fileExists(atPath: sourceFile.path), "Undo should move an item back to its original location")
+let restoredExistingContents = try Data(contentsOf: destinationRoot.appendingPathComponent("notes.txt"))
+require(String(data: restoredExistingContents, encoding: .utf8) == "existing", "Undo should restore an item replaced during a move")
+
+let searchableFile = operationsRoot.appendingPathComponent("uniquely-searchable-openexplorer.txt")
+try Data().write(to: searchableFile)
+let recursiveSearchResults = try SpotlightSearch.find(named: "uniquely-searchable-openexplorer", under: operationsRoot)
+require(
+    recursiveSearchResults.map { $0.standardizedFileURL.path }.contains(searchableFile.standardizedFileURL.path),
+    "Recursive search should find newly created files even before Spotlight finishes indexing"
 )
 
 print("OpenExplorerCore checks passed")

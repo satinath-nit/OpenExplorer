@@ -115,16 +115,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             FileHandle.standardError.write(Data("FAIL: OpenExplorer launched without a visible key window\n".utf8))
             exit(1)
         }
-        let shortcuts: [(String, String)] = [("New Tab", "n"), ("Copy", "c"), ("Paste", "v"), ("Close Window", "x")]
+        let shortcuts: [(String, String)] = [("New Tab", "n"), ("Copy", "c"), ("Paste", "v"), ("Close Window", "w")]
         guard shortcuts.allSatisfy({ menuItem(titled: $0.0)?.keyEquivalent == $0.1 && menuItem(titled: $0.0)?.target === browserWindow }) else {
             FileHandle.standardError.write(Data("FAIL: OpenExplorer keyboard shortcuts are not routed to the browser window\n".utf8))
             exit(1)
         }
         guard let cutItem = menuItem(titled: "Cut"),
               cutItem.keyEquivalent == "x",
-              cutItem.keyEquivalentModifierMask == [.command, .shift],
+              cutItem.keyEquivalentModifierMask == [.command],
               cutItem.target === browserWindow else {
-            FileHandle.standardError.write(Data("FAIL: Cut is not routed to Shift-Command-X\n".utf8))
+            FileHandle.standardError.write(Data("FAIL: Cut is not routed to Command-X\n".utf8))
+            exit(1)
+        }
+        guard menuItem(titled: "Undo Last File Operation")?.keyEquivalent == "z",
+              menuItem(titled: "Get Info")?.keyEquivalent == "i" else {
+            FileHandle.standardError.write(Data("FAIL: Finder-replacement shortcuts are incomplete\n".utf8))
             exit(1)
         }
         let appearanceFailures = browserWindow?.appearanceSmokeTestFailures() ?? ["browser window is unavailable"]
@@ -173,8 +178,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func finishSuccessfulSmokeTest() {
         print("PASS: OpenExplorer launched with a visible key window")
-        print("PASS: Command-X closes the window and Shift-Command-X cuts selections")
+        print("PASS: Command-W closes the window and Command-X cuts selections")
         print("PASS: Command-N, Command-C, and Command-V are routed to the browser window")
+        print("PASS: Command-Z undo and Command-I Get Info are available")
         print("PASS: OpenExplorer surfaces adapt to light and dark appearance")
         print("PASS: Address editing and folder location actions are available")
         print("PASS: List and icon views export files and folders to other apps")
@@ -216,6 +222,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         open.target = browserWindow
         let quickLook = fileMenu.addItem(withTitle: "Quick Look", action: #selector(BrowserWindowController.quickLook(_:)), keyEquivalent: "y")
         quickLook.target = browserWindow
+        let getInfo = fileMenu.addItem(withTitle: "Get Info", action: #selector(BrowserWindowController.showGetInfo(_:)), keyEquivalent: "i")
+        getInfo.target = browserWindow
         fileMenu.addItem(.separator())
         let rename = fileMenu.addItem(withTitle: "Rename", action: #selector(BrowserWindowController.renameSelection(_:)), keyEquivalent: "\r")
         rename.target = browserWindow
@@ -226,8 +234,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let editItem = NSMenuItem()
         let editMenu = NSMenu(title: "Edit")
+        let undo = editMenu.addItem(withTitle: "Undo Last File Operation", action: #selector(BrowserWindowController.undoLastOperation(_:)), keyEquivalent: "z")
+        undo.target = browserWindow
+        editMenu.addItem(.separator())
         let cut = editMenu.addItem(withTitle: "Cut", action: #selector(BrowserWindowController.cutSelection(_:)), keyEquivalent: "x")
-        cut.keyEquivalentModifierMask = [.command, .shift]
+        cut.keyEquivalentModifierMask = [.command]
         cut.target = browserWindow
         let copy = editMenu.addItem(withTitle: "Copy", action: #selector(BrowserWindowController.copySelection(_:)), keyEquivalent: "c")
         copy.target = browserWindow
@@ -257,7 +268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let windowItem = NSMenuItem()
         let windowMenu = NSMenu(title: "Window")
-        let closeWindow = windowMenu.addItem(withTitle: "Close Window", action: #selector(BrowserWindowController.closeWindow(_:)), keyEquivalent: "x")
+        let closeWindow = windowMenu.addItem(withTitle: "Close Window", action: #selector(BrowserWindowController.closeWindow(_:)), keyEquivalent: "w")
         closeWindow.target = browserWindow
         windowMenu.addItem(.separator())
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
