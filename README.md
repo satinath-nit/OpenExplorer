@@ -2,7 +2,13 @@
 
 OpenExplorer is a native, open-source macOS file manager for people who prefer the direct navigation and layout choices of Windows File Explorer. It is written in Swift with AppKit, runs fully offline, and has no third-party runtime dependencies.
 
-Designed and developed by Satinath Mondal.
+<!-- BEGIN LATEST DOWNLOAD BUTTON -->
+[![Download DMG FIle](https://custom-icon-badges.demolab.com/badge/-Download-blue?style=for-the-badge&logo=download&logoColor=white "Download zip")](https://github.com/satinath-nit/OpenExplorer/releases/download/v2.1.1/OpenExplorer-arm64.dmg)
+<!-- END LATEST DOWNLOAD BUTTON -->
+
+![OpenExplorer](./screenshots/OpenExplorer-Demo.gif)
+
+
 
 ## Features
 
