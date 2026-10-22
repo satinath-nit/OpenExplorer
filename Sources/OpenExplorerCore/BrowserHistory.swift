@@ -39,14 +39,30 @@ public struct BrowserHistory: Sendable {
 }
 
 public enum FileTextFormatter {
+    private static let packageExtensions: Set<String> = [
+        "app", "bundle", "framework", "plugin", "prefpane", "qlgenerator", "appex", "xcodeproj", "xcworkspace", "playground"
+    ]
+
+    public static func isPackage(_ url: URL) -> Bool {
+        if packageExtensions.contains(url.pathExtension.lowercased()) {
+            return true
+        }
+        if let values = try? url.resourceValues(forKeys: [.isPackageKey, .isApplicationKey]) {
+            return (values.isPackage == true) || (values.isApplication == true)
+        }
+        return false
+    }
+
     public static func byteCount(_ value: Int64, isDirectory: Bool) -> String {
         guard !isDirectory else { return "—" }
         return ByteCountFormatter.string(fromByteCount: value, countStyle: .file)
     }
 
     public static func kind(for url: URL, isDirectory: Bool) -> String {
+        let ext = url.pathExtension.lowercased()
+        if ext == "app" { return "Application" }
         if isDirectory { return "Folder" }
-        let ext = url.pathExtension
-        return ext.isEmpty ? "File" : "\(ext.uppercased()) file"
+        if isPackage(url) { return "\(url.pathExtension.uppercased()) package" }
+        return ext.isEmpty ? "File" : "\(url.pathExtension.uppercased()) file"
     }
 }

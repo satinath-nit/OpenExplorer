@@ -15,7 +15,13 @@ let package = Package(
             dependencies: ["OpenExplorerCore"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
-                .linkedFramework("Carbon")
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("Carbon"),
+                .linkedFramework("CoreVideo"),
+                .linkedFramework("ImageIO"),
+                .linkedFramework("QuickLookThumbnailing"),
+                .linkedFramework("QuickLookUI"),
+                .linkedFramework("ServiceManagement")
             ]
         ),
         .executableTarget(name: "OpenExplorerCoreChecks", dependencies: ["OpenExplorerCore"])

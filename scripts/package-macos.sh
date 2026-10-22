@@ -29,6 +29,11 @@ cp "$PROJECT_DIR/Resources/OpenExplorer.icns" "$CONTENTS_DIR/Resources/OpenExplo
 
 codesign --force --deep --sign - "$APP_DIR"
 
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
+if [[ -x "$LSREGISTER" ]]; then
+    "$LSREGISTER" -f "$APP_DIR" || true
+fi
+
 DMG_PATH="$RELEASE_DIR/OpenExplorer-$APP_VERSION-$TARGET_ARCH.dmg"
 rm -f "$DMG_PATH"
 hdiutil create -volname "$APP_NAME" -srcfolder "$APP_DIR" -ov -format UDZO "$DMG_PATH"

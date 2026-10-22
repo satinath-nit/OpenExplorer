@@ -22,6 +22,8 @@ require(FileTextFormatter.byteCount(1_024, isDirectory: false).contains("KB"), "
 require(FileTextFormatter.byteCount(1_024, isDirectory: true) == "—", "Folders should not show a byte size")
 require(FileTextFormatter.kind(for: URL(fileURLWithPath: "/tmp/report.pdf"), isDirectory: false) == "PDF file", "Extensions should format as file kinds")
 require(FileTextFormatter.kind(for: URL(fileURLWithPath: "/tmp/docs"), isDirectory: true) == "Folder", "Directories should format as folders")
+require(FileTextFormatter.isPackage(URL(fileURLWithPath: "/Applications/Safari.app")), ".app bundles should be recognized as packages rather than plain folders")
+require(FileTextFormatter.kind(for: URL(fileURLWithPath: "/Applications/Safari.app"), isDirectory: false) == "Application", ".app bundles should format as Application")
 
 let cocoaPermissionError = NSError(
     domain: NSCocoaErrorDomain,
@@ -126,6 +128,26 @@ require(
 )
 directoryMonitor.stop()
 
+let pollingRefreshDirectory = creationTestDirectory.appendingPathComponent("polling-refresh", isDirectory: true)
+try FileManager.default.createDirectory(at: pollingRefreshDirectory, withIntermediateDirectories: false)
+let pollingChangeObserved = DispatchSemaphore(value: 0)
+let pollingDirectoryMonitor = try DirectoryMonitor(
+    url: pollingRefreshDirectory,
+    pollInterval: .milliseconds(50),
+    nativeEventsEnabled: false
+) {
+    pollingChangeObserved.signal()
+}
+pollingDirectoryMonitor.start()
+try Data("added while the folder remains open".utf8).write(
+    to: pollingRefreshDirectory.appendingPathComponent("new-file.txt")
+)
+require(
+    pollingChangeObserved.wait(timeout: .now() + 2) == .success,
+    "An open folder should detect a newly added file even when native filesystem events are unavailable"
+)
+pollingDirectoryMonitor.stop()
+
 let zipSource = creationTestDirectory.appendingPathComponent("zip-source", isDirectory: true)
 try FileManager.default.createDirectory(at: zipSource, withIntermediateDirectories: false)
 try Data("OpenExplorer ZIP check".utf8).write(to: zipSource.appendingPathComponent("payload.txt"))
@@ -186,5 +208,148 @@ require(
     recursiveSearchResults.map { $0.standardizedFileURL.path }.contains(searchableFile.standardizedFileURL.path),
     "Recursive search should find newly created files even before Spotlight finishes indexing"
 )
+
+// Test Right-Click ZIP Compression (macOS Native & Clean Cross-Platform) + Virtual Archive Inspection
+let compressSource = creationTestDirectory.appendingPathComponent("ProjectFolder", isDirectory: true)
+try FileManager.default.createDirectory(at: compressSource, withIntermediateDirectories: true)
+try Data("hello world".utf8).write(to: compressSource.appendingPathComponent("readme.md"))
+try Data("junk".utf8).write(to: compressSource.appendingPathComponent(".DS_Store"))
+
+let cleanZip = try ZipExtractor.compress([compressSource], in: creationTestDirectory, mode: .cleanCrossPlatform)
+require(cleanZip.lastPathComponent == "ProjectFolder.zip", "Single folder compression should be named after the folder")
+let secondZip = try ZipExtractor.compress([compressSource], in: creationTestDirectory, mode: .macOSNative)
+require(secondZip.lastPathComponent == "ProjectFolder 2.zip", "Repeated compression should use collision-safe naming")
+
+let archiveEntries = try ZipExtractor.listEntries(in: cleanZip)
+require(archiveEntries.contains(where: { $0.path.hasSuffix("readme.md") }), "Archive listing should include readme.md")
+require(!archiveEntries.contains(where: { $0.path.contains(".DS_Store") }), "Clean Cross-Platform ZIP must exclude .DS_Store")
+
+// Test compressing a folder with broken symlinks, empty folders, and into itself
+let brokenSymlinkURL = compressSource.appendingPathComponent("dangling-link")
+try FileManager.default.createSymbolicLink(atPath: brokenSymlinkURL.path, withDestinationPath: "/nonexistent/target/path")
+let selfCompressedZip = try ZipExtractor.compress([compressSource], in: compressSource, mode: .cleanCrossPlatform)
+require(FileManager.default.fileExists(atPath: selfCompressedZip.path), "Compressing a folder with a dangling symlink or into itself should succeed")
+
+let emptyFolder = creationTestDirectory.appendingPathComponent("EmptyDir", isDirectory: true)
+try FileManager.default.createDirectory(at: emptyFolder, withIntermediateDirectories: true)
+let emptyZip = try ZipExtractor.compress([emptyFolder], in: creationTestDirectory, mode: .cleanCrossPlatform)
+require(FileManager.default.fileExists(atPath: emptyZip.path), "Compressing an empty folder in Clean Cross-Platform mode should succeed")
+
+let singleExtractDir = creationTestDirectory.appendingPathComponent("single-extract", isDirectory: true)
+try FileManager.default.createDirectory(at: singleExtractDir, withIntermediateDirectories: true)
+let extractedSingleFile = try ZipExtractor.extractEntry("ProjectFolder/readme.md", from: cleanZip, to: singleExtractDir)
+require(FileManager.default.fileExists(atPath: extractedSingleFile.path), "Single entry extraction should materialize the requested file")
+
+// Test Batch Rename Engine
+let renameDir = creationTestDirectory.appendingPathComponent("batch-rename", isDirectory: true)
+try FileManager.default.createDirectory(at: renameDir, withIntermediateDirectories: true)
+let fileA = renameDir.appendingPathComponent("IMG_100.jpg")
+let fileB = renameDir.appendingPathComponent("IMG_101.jpg")
+try Data("a".utf8).write(to: fileA)
+try Data("b".utf8).write(to: fileB)
+let numberPlan = BatchRenameEngine.preview(
+    for: [fileA, fileB],
+    rule: .sequentialNumbering(baseName: "photo", startNumber: 1, paddingDigits: 3, separator: "_")
+)
+require(numberPlan.map(\.proposedName) == ["photo_001.jpg", "photo_002.jpg"], "Sequential numbering should pad numbers")
+let renameRecords = try BatchRenameEngine.apply(numberPlan)
+require(renameRecords.count == 2, "Batch rename should apply both renames")
+require(FileManager.default.fileExists(atPath: renameDir.appendingPathComponent("photo_001.jpg").path), "Renamed file should exist")
+
+// Test Multi-Step Undo & Redo Stack
+let undoStack = FileUndoStack(engine: operationEngine)
+undoStack.record(.transfer(renameRecords))
+require(undoStack.canUndo, "Undo stack should have recorded batch rename")
+let undoOutcome = undoStack.undoLast()
+require(undoOutcome?.failures.isEmpty == true, "Undoing batch rename via FileUndoStack should succeed")
+require(FileManager.default.fileExists(atPath: fileA.path), "Original filename should be restored after undo")
+require(undoStack.canRedo, "Redo should be available after undo")
+let redoOutcome = undoStack.redoLast()
+require(redoOutcome?.failures.isEmpty == true, "Redoing batch rename should succeed")
+require(FileManager.default.fileExists(atPath: renameDir.appendingPathComponent("photo_001.jpg").path), "Redo should reapply batch rename")
+
+// Test Checksums & File Hashing
+let hashFile = creationTestDirectory.appendingPathComponent("hash-test.txt")
+try Data("OpenExplorer".utf8).write(to: hashFile)
+let hashes = try FileHashCalculator.computeHashes(for: hashFile)
+require(hashes.sha256.count == 64 && hashes.sha1.count == 40 && hashes.md5.count == 32, "SHA-256, SHA-1, and MD5 checksums should be valid hex digests")
+
+// Test Developer Project Badge Detection & Templates
+let swiftPkgDir = creationTestDirectory.appendingPathComponent("SamplePkg", isDirectory: true)
+try FileManager.default.createDirectory(at: swiftPkgDir, withIntermediateDirectories: true)
+try Data().write(to: swiftPkgDir.appendingPathComponent("Package.swift"))
+require(GitRepositoryInspector.projectBadge(for: swiftPkgDir) == .swiftPackage, "Folders with Package.swift should be badged as Swift Package")
+
+let createdTemplate = try DeveloperToolsManager.createFromTemplate(DeveloperToolsManager.builtInTemplates[0], in: swiftPkgDir)
+require(FileManager.default.fileExists(atPath: createdTemplate.path), "Developer template file creation should succeed")
+
+// Test Path Autocomplete & Sibling Folders
+let expandedHome = PathAutocompleteEngine.expandPath("~/Documents")
+require(expandedHome.hasPrefix("/"), "Tilde path should expand to an absolute path")
+let siblings = PathAutocompleteEngine.siblingDirectories(of: swiftPkgDir)
+require(siblings.contains(where: { $0.lastPathComponent == "SamplePkg" }), "Sibling directory discovery should list neighboring folders")
+
+// Test Command Palette & Fuzzy Navigation Engine (⌘K / ⌘P)
+require(CommandPaletteEngine.fuzzyScore(query: "clnzip", against: "Compress Clean ZIP") != nil, "Fuzzy subsequence query should match 'Compress Clean ZIP'")
+require(CommandPaletteEngine.fuzzyScore(query: "pkg", against: "Package.swift")! > CommandPaletteEngine.fuzzyScore(query: "pkg", against: "some-other-package-file.txt")!, "Prefix/boundary match should outscore deep match")
+let samplePaletteItems: [CommandPaletteItem] = [
+    CommandPaletteItem(id: "cmd1", title: "Compress Clean ZIP", subtitle: "Strip .DS_Store", category: "Archive", symbolName: "sparkles", target: .command("clean")),
+    CommandPaletteItem(id: "folder1", title: "SamplePkg", subtitle: swiftPkgDir.path, category: "Folder", symbolName: "folder.fill", target: .folder(swiftPkgDir))
+]
+let commandRanked = CommandPaletteEngine.rank(items: samplePaletteItems, query: ">zip", mode: .fuzzyNavigation)
+require(commandRanked.count == 1 && commandRanked.first?.id == "cmd1", "Leading '>' should filter strictly to commands even in fuzzy navigation mode")
+let nestedDiscovered = CommandPaletteEngine.discoverNestedItems(under: creationTestDirectory, maxDepth: 3)
+require(nestedDiscovered.contains(where: { $0.relativePath.contains("Package.swift") }), "Nested fuzzy discovery should find files inside subdirectories")
+
+// Test .gitignore Awareness, Dimming Matcher & Default Recursive Search Exclusion
+let gitIgnoreTestRoot = creationTestDirectory.appendingPathComponent("gitignore-repo", isDirectory: true)
+let nodeModulesDir = gitIgnoreTestRoot.appendingPathComponent("node_modules/pkg", isDirectory: true)
+let dotBuildDir = gitIgnoreTestRoot.appendingPathComponent(".build/arm64", isDirectory: true)
+let distDir = gitIgnoreTestRoot.appendingPathComponent("dist", isDirectory: true)
+let targetDir = gitIgnoreTestRoot.appendingPathComponent("target", isDirectory: true)
+let srcDir = gitIgnoreTestRoot.appendingPathComponent("src", isDirectory: true)
+for dir in [nodeModulesDir, dotBuildDir, distDir, targetDir, srcDir] {
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+}
+let gitignoreContent = """
+# Build and log outputs
+*.log
+/secret-config.json
+custom-ignored-dir/
+!important.log
+"""
+try Data(gitignoreContent.utf8).write(to: gitIgnoreTestRoot.appendingPathComponent(".gitignore"))
+let ignoredDepFile = nodeModulesDir.appendingPathComponent("searchable-token-xyz.js")
+let ignoredBuildFile = dotBuildDir.appendingPathComponent("searchable-token-xyz.o")
+let ignoredDistFile = distDir.appendingPathComponent("searchable-token-xyz.bundle.js")
+let ignoredTargetFile = targetDir.appendingPathComponent("searchable-token-xyz.rlib")
+let ignoredLogFile = gitIgnoreTestRoot.appendingPathComponent("debug-searchable-token-xyz.log")
+let unignoredImportantLog = gitIgnoreTestRoot.appendingPathComponent("important.log")
+let trackedSrcFile = srcDir.appendingPathComponent("searchable-token-xyz.swift")
+for file in [ignoredDepFile, ignoredBuildFile, ignoredDistFile, ignoredTargetFile, ignoredLogFile, unignoredImportantLog, trackedSrcFile] {
+    try Data("sample".utf8).write(to: file)
+}
+
+let ignoreMatcher = GitIgnoreMatcher(directory: gitIgnoreTestRoot)
+require(ignoreMatcher.isIgnored(gitIgnoreTestRoot.appendingPathComponent("node_modules"), isDirectory: true), "node_modules should be recognized as git-ignored")
+require(ignoreMatcher.isIgnored(gitIgnoreTestRoot.appendingPathComponent(".build"), isDirectory: true), ".build should be recognized as git-ignored")
+require(ignoreMatcher.isIgnored(distDir, isDirectory: true), "dist should be recognized as git-ignored")
+require(ignoreMatcher.isIgnored(targetDir, isDirectory: true), "target should be recognized as git-ignored")
+require(ignoreMatcher.isIgnored(ignoredLogFile, isDirectory: false), "*.log pattern in .gitignore should mark debug log as ignored")
+require(!ignoreMatcher.isIgnored(unignoredImportantLog, isDirectory: false), "!important.log negation rule should un-ignore important.log")
+require(!ignoreMatcher.isIgnored(trackedSrcFile, isDirectory: false), "Regular source files should not be marked git-ignored")
+
+let defaultFilteredSearch = try SpotlightSearch.find(named: "searchable-token-xyz", under: gitIgnoreTestRoot)
+let defaultFilteredPaths = Set(defaultFilteredSearch.map { $0.standardizedFileURL.path })
+require(defaultFilteredPaths.contains(trackedSrcFile.standardizedFileURL.path), "Recursive search should return non-ignored source files")
+require(!defaultFilteredPaths.contains(ignoredDepFile.standardizedFileURL.path), "Recursive search should exclude node_modules by default")
+require(!defaultFilteredPaths.contains(ignoredBuildFile.standardizedFileURL.path), "Recursive search should exclude .build by default")
+require(!defaultFilteredPaths.contains(ignoredDistFile.standardizedFileURL.path), "Recursive search should exclude dist by default")
+require(!defaultFilteredPaths.contains(ignoredTargetFile.standardizedFileURL.path), "Recursive search should exclude target by default")
+require(!defaultFilteredPaths.contains(ignoredLogFile.standardizedFileURL.path), "Recursive search should exclude .gitignore matched files by default")
+
+let unfilteredSearch = try SpotlightSearch.find(named: "searchable-token-xyz", under: gitIgnoreTestRoot, excludeGitIgnored: false)
+let unfilteredPaths = Set(unfilteredSearch.map { $0.standardizedFileURL.path })
+require(unfilteredPaths.contains(ignoredDepFile.standardizedFileURL.path) && unfilteredPaths.contains(ignoredLogFile.standardizedFileURL.path), "Disabling excludeGitIgnored should include ignored files in recursive search")
 
 print("OpenExplorerCore checks passed")

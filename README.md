@@ -2,11 +2,7 @@
 
 OpenExplorer is a native, open-source macOS file manager for people who prefer the direct navigation and layout choices of Windows File Explorer. It is written in Swift with AppKit, runs fully offline, and has no third-party runtime dependencies.
 
-<!-- BEGIN LATEST DOWNLOAD BUTTON -->
-[![Download DMG FIle](https://custom-icon-badges.demolab.com/badge/-Download-blue?style=for-the-badge&logo=download&logoColor=white "Download zip")](https://github.com/satinath-nit/OpenExplorer/releases/download/v2.0.2/OpenExplorer-arm64.dmg)
-<!-- END LATEST DOWNLOAD BUTTON -->
-
-![OpenExplorer](./OpenExplorer.jpeg)
+Designed and developed by Satinath Mondal.
 
 ## Features
 
@@ -26,7 +22,7 @@ OpenExplorer is a native, open-source macOS file manager for people who prefer t
 - Get Info displays calculated size, ownership and permissions; POSIX permissions and the Locked flag can be edited
 - Connect to SMB, AFP, NFS, and WebDAV server addresses from the sidebar
 - Extract ZIP archives directly inside OpenExplorer without opening Finder; extracted folders appear automatically and use a safe numbered name when needed
-- Live folder monitoring keeps the current view synchronized with downloads, Archive Utility, Terminal, and other applications without requiring a manual refresh
+- Hybrid native-event and polling-based folder monitoring keeps the current view synchronized with downloads, cloud folders, Archive Utility, Terminal, and other applications; **Refresh** is also available from the toolbar and right-click menu
 - Quick Look integration remains available for native macOS previews, alongside an **Open With** menu that discovers compatible installed applications and provides **Choose Application…**
 - Built-in plain-text editor for dotfiles and text files such as `.zshrc`, `.bashrc`, `.env`, Markdown, JSON, and source code, with line numbers, Find, line wrapping, external-change protection, and `⌘S` Save
 - Optional hidden-file display
@@ -102,6 +98,16 @@ This builds the shared core and runs its checks. After packaging, run the UI sta
 
 The smoke test verifies that the application opens a visible key window, adapts to light and dark appearance, exposes address and folder-location actions, preserves List columns across view changes, remains running after its last window closes, reopens from the Dock, and routes standard shortcuts including `⌘W` Close Window and `⌘X` Cut to the explorer window.
 
+## Generate feature screenshots and animated demo
+
+To capture privacy-safe screenshots of all views and features along with `.mp4` and `.gif` showcase animations in an isolated temporary workspace:
+
+```bash
+OPENEXPLORER_CAPTURE_SCREENSHOTS="$PWD/screenshots" swift run OpenExplorer
+```
+
+This creates synthetic sample folders and files under a temporary sandbox, masks paths with a generic `/Users/alex` home path so no personal filenames or user paths are exposed, writes all 19 PNG screenshots plus `OpenExplorer-Demo.mp4` and `OpenExplorer-Demo.gif` into `screenshots/`, and cleans up the sandbox on exit.
+
 ## Build the macOS application and DMG
 
 Run the packaging script on macOS:
@@ -123,10 +129,10 @@ release/OpenExplorer.app
 release/OpenExplorer-<version>-<architecture>.dmg
 ```
 
-For example, an Apple-silicon build of version 2.0.2 produces:
+For example, an Apple-silicon build of version 2.0.3 produces:
 
 ```text
-release/OpenExplorer-2.0.2-arm64.dmg
+release/OpenExplorer-2.0.3-arm64.dmg
 ```
 
 To request a specific architecture supported by the installed toolchain:
